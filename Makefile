@@ -1,0 +1,75 @@
+# Native Android shell. No Java sources: NativeActivity loads libpenship.so.
+
+ANDROID_HOME ?= $(HOME)/.android-sdk
+NDK := $(lastword $(sort $(wildcard $(ANDROID_HOME)/ndk/*)))
+BUILD_TOOLS := $(lastword $(sort $(wildcard $(ANDROID_HOME)/build-tools/*)))
+PLATFORM := $(lastword $(sort $(wildcard $(ANDROID_HOME)/platforms/android-*/android.jar)))
+TOOLCHAIN := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64
+GLUE := $(NDK)/sources/android/native_app_glue
+MIN_SDK := 24
+
+AAPT2 := $(BUILD_TOOLS)/aapt2
+ZIPALIGN := $(BUILD_TOOLS)/zipalign
+APKSIGNER := $(BUILD_TOOLS)/apksigner
+ADB := $(ANDROID_HOME)/platform-tools/adb
+
+ABIS := arm64-v8a x86_64
+CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -fPIC -I$(GLUE) -Isrc
+GLUE_CFLAGS := -std=c11 -O2 -fPIC -I$(GLUE) -Wno-unused-parameter
+LDFLAGS := -shared -pthread -Wl,-z,max-page-size=16384 -Wl,-u,ANativeActivity_onCreate \
+	-landroid -llog -lEGL -lGLESv2
+
+.PHONY: all test apk install clean
+.SECONDARY:
+
+all: test apk
+
+build/page_test: src/page.c src/page_test.c src/page.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/page_test.c src/page.c
+
+test: build/page_test
+	./build/page_test
+
+build/obj/%/main.o: src/main.c src/page.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/main.c
+
+build/obj/%/page.o: src/page.c src/page.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/page.c
+
+build/obj/%/glue.o: $(GLUE)/android_native_app_glue.c
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(GLUE_CFLAGS) -c -o $@ $(GLUE)/android_native_app_glue.c
+
+build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/page.o build/obj/%/glue.o
+	@test -n "$(NDK)" || (echo "NDK not found under $(ANDROID_HOME)/ndk" && exit 1)
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(LDFLAGS) -o $@ $^
+
+# $(call triple,arm64-v8a) -> aarch64-linux-android24
+triple = $(if $(filter arm64-v8a,$1),aarch64-linux-android$(MIN_SDK),$(if $(filter x86_64,$1),x86_64-linux-android$(MIN_SDK),$(error unknown abi $1)))
+
+apk: test $(foreach abi,$(ABIS),build/lib/$(abi)/libpenship.so) android/AndroidManifest.xml
+	@test -n "$(BUILD_TOOLS)" || (echo "build-tools not found under $(ANDROID_HOME)" && exit 1)
+	mkdir -p build
+	$(AAPT2) link -o build/linked.apk --manifest android/AndroidManifest.xml -I $(PLATFORM) \
+		--min-sdk-version $(MIN_SDK) --target-sdk-version 36
+	python3 tools/pack_apk.py build/linked.apk build/unaligned.apk \
+		$(foreach abi,$(ABIS),lib/$(abi)/libpenship.so=build/lib/$(abi)/libpenship.so)
+	$(ZIPALIGN) -P 16 -f 4 build/unaligned.apk build/aligned.apk
+	@test -f build/debug.keystore || keytool -genkeypair -keystore build/debug.keystore \
+		-storepass android -alias androiddebugkey -keypass android \
+		-keyalg RSA -keysize 2048 -validity 10000 \
+		-dname "CN=penship debug, OU=penship, O=penship, L=local, S=local, C=US"
+	$(APKSIGNER) sign --ks build/debug.keystore --ks-pass pass:android --key-pass pass:android \
+		--out build/penship.apk build/aligned.apk
+	$(APKSIGNER) verify --verbose build/penship.apk
+
+install: apk
+	$(ADB) install -r build/penship.apk
+	$(ADB) shell am start -n app.penship/android.app.NativeActivity
+
+clean:
+	rm -rf build
