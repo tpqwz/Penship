@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int fail;
 
@@ -12,48 +13,567 @@ static void expect(int cond, const char *msg) {
     }
 }
 
-static uint8_t *at(uint8_t *px, int w, int x, int y) {
-    return px + ((size_t)y * (size_t)w + (size_t)x) * 4;
+static unsigned char *load_font(int *len) {
+    FILE *file = fopen("assets/LiberationSans-Regular.ttf", "rb");
+    expect(file != NULL, "open font");
+    if (file == NULL) {
+        return NULL;
+    }
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    unsigned char *bytes = malloc((size_t)size);
+    expect(bytes != NULL && fread(bytes, 1, (size_t)size, file) == (size_t)size, "read font");
+    fclose(file);
+    *len = (int)size;
+    return bytes;
 }
 
-/* 1x layout of "penship": 7*5 + 6 gaps = 41 by 7, origin (0, 0).
-   'p' column 0 is ink on rows 1..6. The gap after 'p' is column 5. */
-static void test_one_to_one(void) {
-    const int w = 41;
-    const int h = 7;
-    uint8_t *px = calloc((size_t)w * (size_t)h, 4);
+static int ink_at(const uint8_t *px, int width, int x, int y) {
+    const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+    return p[0] != PAGE_PAPER_R || p[1] != PAGE_PAPER_G || p[2] != PAGE_PAPER_B;
+}
+
+static void test_caret_and_glyph(const unsigned char *font, int font_len) {
+    expect(page_set_font(NULL, 0) == -1, "reject empty font");
+    expect(page_set_font(font, font_len) == 0, "set font");
+
+    const int width = 240;
+    const int height = 160;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
     expect(px != NULL, "alloc");
     if (px == NULL) {
         return;
     }
-    page_draw(px, w, h);
-    expect(at(px, w, 0, 0)[0] == PAGE_PAPER_R, "corner is paper");
-    expect(at(px, w, 0, 1)[0] == PAGE_INK_R, "p stem is ink");
-    expect(at(px, w, 0, 1)[1] == PAGE_INK_G && at(px, w, 0, 1)[2] == PAGE_INK_B, "ink is the page color");
-    expect(at(px, w, 5, 1)[0] == PAGE_PAPER_R, "gap after p stays paper");
-    expect(at(px, w, w - 1, h - 1)[0] == PAGE_PAPER_R, "opposite corner is paper");
+
+    page_draw(px, width, height, 0, 0, width, height, "", 0, 0, 0, font_px);
+    expect(!ink_at(px, width, 0, 0), "corner stays paper");
+    int caret_ink = 0;
+    int caret_inside = 1;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!ink_at(px, width, x, y)) {
+                continue;
+            }
+            caret_ink++;
+            if (x < margin || x >= margin + 4) {
+                caret_inside = 0;
+            }
+        }
+    }
+    expect(caret_ink > 8, "empty page shows a caret");
+    expect(caret_inside, "caret sits in the left margin column");
+
+    page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
+    int letter = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = margin + 8; x < width; x++) {
+            if (ink_at(px, width, x, y)) {
+                letter = 1;
+            }
+        }
+    }
+    expect(letter, "H draws ink to the right of the margin");
     free(px);
 }
 
-/* Scale 2 doubles each glyph pixel. Glyph (0, 1) covers buffer pixels (0..1, 2..3). */
-static void test_scale(void) {
-    const int w = 82;
-    const int h = 14;
-    uint8_t *px = calloc((size_t)w * (size_t)h, 4);
-    expect(px != NULL, "alloc scale");
+static int near_rgb(const uint8_t *px, int width, int height, int r, int g, int b) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = p[0] - r;
+            int dg = p[1] - g;
+            int db = p[2] - b;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 12 && dg <= 12 && db <= 12) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void test_hit(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "hit font");
+    const int width = 400;
+    const int height = 300;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    const char *text = "ab\ncd";
+    size_t at = page_hit(0, 0, width, height, text, 5, 5, font_px, margin, margin + 2);
+    expect(at == 0, "the top left of the text is the start");
+    at = page_hit(0, 0, width, height, text, 5, 5, font_px, width - 2, margin + 2);
+    expect(at == 2, "the right side of the first row is the end of that line");
+
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "hit buffer");
     if (px == NULL) {
         return;
     }
-    page_draw(px, w, h);
-    expect(at(px, w, 0, 2)[0] == PAGE_INK_R, "scaled stem");
-    expect(at(px, w, 1, 3)[0] == PAGE_INK_R, "scaled stem covers the whole cell");
-    expect(at(px, w, 10, 2)[0] == PAGE_PAPER_R, "scaled gap stays paper");
+    page_draw(px, width, height, 0, 0, width, height, text, 5, 5, 5, font_px);
+    int y = -1;
+    int gap = 0;
+    for (int row = margin + font_px; row < height; row++) {
+        if (ink_at(px, width, margin + 12, row)) {
+            if (gap > 4) {
+                y = row + 2;
+                break;
+            }
+        } else if (y < 0) {
+            gap++;
+        }
+    }
+    expect(y > margin, "the second line is on screen");
+    at = page_hit(0, 0, width, height, text, 5, 5, font_px, margin + 4, y);
+    expect(at == 3, "a tap on the second line lands on c");
+    free(px);
+}
+
+static int ink_rows(const uint8_t *px, int width, int y0, int y1) {
+    int n = 0;
+    for (int y = y0; y < y1; y++) {
+        for (int x = 0; x < width; x++) {
+            if (ink_at(px, width, x, y)) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static void test_user_scroll(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "scroll font");
+    page_set_typewriter(0);
+    page_set_follow(1);
+    const int width = 200;
+    const int height = 180;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    char text[80];
+    text[0] = 'T';
+    memset(text + 1, '\n', sizeof text - 1);
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "scroll buffer");
+    if (px == NULL) {
+        return;
+    }
+    page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
+    int away = ink_rows(px, width, 0, margin + 4);
+    expect(away == 0, "following the caret hides the top line");
+    page_scroll_by(-1000000);
+    page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
+    int back = ink_rows(px, width, margin, margin + font_px);
+    expect(back > 8, "scrolling toward the start shows T");
+    page_set_follow(1);
+    page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
+    expect(ink_rows(px, width, 0, margin + 4) == 0, "follow brings the caret back");
+    page_draw(px, width, height, 0, 0, width, height, "T", 1, 0, 0, font_px);
+    expect(page_caret_near(margin, margin + 4, 64), "the caret sits by the margin");
+    expect(!page_caret_near(width - 2, height - 2, 24), "the far corner is not the caret");
+    expect(page_edge(100, 100, 500, 40) == -1, "the top zone scrolls up");
+    expect(page_edge(200, 100, 500, 40) == 0, "the middle does not scroll");
+    expect(page_edge(470, 100, 500, 40) == 1, "the bottom zone scrolls down");
+    free(px);
+}
+
+static void test_markdown(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "markdown font");
+    const int width = 480;
+    const int height = 240;
+    const int font_px = 32;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "markdown alloc");
+    if (px == NULL) {
+        return;
+    }
+    const char *samples[] = {"# H", "*H*", "`H`", "[H](u)", "```\nH\n```", "- H", "> H", "1. H", "~~H~~"};
+    const int reds[] = {PAGE_HEAD_R, PAGE_EM_R, PAGE_CODE_R, PAGE_LINK_R, PAGE_CODE_R, PAGE_LIST_R, PAGE_QUOTE_R,
+                        PAGE_LIST_R, PAGE_STRIKE_R};
+    const int greens[] = {PAGE_HEAD_G, PAGE_EM_G, PAGE_CODE_G, PAGE_LINK_G, PAGE_CODE_G, PAGE_LIST_G, PAGE_QUOTE_G,
+                          PAGE_LIST_G, PAGE_STRIKE_G};
+    const int blues[] = {PAGE_HEAD_B, PAGE_EM_B, PAGE_CODE_B, PAGE_LINK_B, PAGE_CODE_B, PAGE_LIST_B, PAGE_QUOTE_B,
+                         PAGE_LIST_B, PAGE_STRIKE_B};
+    const char *names[] = {"heading", "emphasis", "code", "link", "fenced code", "list", "quote", "ordered list",
+                           "strike"};
+    for (int i = 0; i < 9; i++) {
+        page_draw(px, width, height, 0, 0, width, height, samples[i], strlen(samples[i]), strlen(samples[i]),
+                  strlen(samples[i]), font_px);
+        expect(near_rgb(px, width, height, reds[i], greens[i], blues[i]), names[i]);
+    }
+    page_draw(px, width, height, 0, 0, width, height, "```\nH\n```", 9, 9, 9, font_px);
+    expect(near_rgb(px, width, height, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B), "fenced block wash");
+    page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
+    expect(!near_rgb(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B), "body is not a heading");
+    free(px);
+}
+
+static void test_tall_note(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "tall font");
+    const int width = 80;
+    const int height = 120;
+    const size_t n = 600000;
+    char *text = malloc(n);
+    expect(text != NULL, "tall alloc");
+    if (text == NULL) {
+        return;
+    }
+    memset(text, '\n', n);
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "tall page");
+    if (px != NULL) {
+        page_draw(px, width, height, 0, 0, width, height, text, n, n, n, 4096);
+        int ink = 0;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (ink_at(px, width, x, y)) {
+                    ink++;
+                }
+            }
+        }
+        expect(ink > 8, "caret stays on screen past a 32-bit pixel height");
+        free(px);
+    }
+    free(text);
+}
+
+static int count_near(const uint8_t *px, int width, int height, int r, int g, int b) {
+    int n = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = p[0] - r;
+            int dg = p[1] - g;
+            int db = p[2] - b;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 12 && dg <= 12 && db <= 12) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static int count_exact(const uint8_t *px, int width, int height, int r, int g, int b) {
+    int n = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            if (p[0] == r && p[1] == g && p[2] == b) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static void test_rendered(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "rendered font");
+    const int width = 480;
+    const int height = 320;
+    const int font_px = 32;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "rendered alloc");
+    if (px == NULL) {
+        return;
+    }
+    const char *head = "# H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), 0, 0, font_px);
+    int head_source = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), strlen(head), strlen(head), font_px);
+    int head_rendered = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    expect(head_rendered > 0 && head_rendered < head_source, "rendered heading hides the hashes");
+
+    const char *list = "- H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, list, strlen(list), 0, 0, font_px);
+    int list_source = count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B);
+    page_draw(px, width, height, 0, 0, width, height, list, strlen(list), strlen(list), strlen(list), font_px);
+    int list_rendered = count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B);
+    expect(list_rendered > list_source && list_rendered > 16, "rendered list draws a bullet");
+
+    const char *quote = "> H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, quote, strlen(quote), 0, 0, font_px);
+    int quote_source = count_exact(px, width, height, PAGE_QUOTE_R, PAGE_QUOTE_G, PAGE_QUOTE_B);
+    page_draw(px, width, height, 0, 0, width, height, quote, strlen(quote), strlen(quote), strlen(quote), font_px);
+    int quote_rendered = count_exact(px, width, height, PAGE_QUOTE_R, PAGE_QUOTE_G, PAGE_QUOTE_B);
+    expect(quote_rendered > quote_source && quote_rendered > 24, "rendered quote draws a bar");
+
+    const char *fence = "```\na\n```\nZ";
+    page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), 4, 4, font_px);
+    int fence_source = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), strlen(fence), strlen(fence), font_px);
+    int fence_rendered = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    expect(fence_rendered > 0 && fence_rendered < fence_source, "rendered fence hides the ticks");
+    expect(near_rgb(px, width, height, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B), "rendered fence keeps the wash");
+
+    const char *rule = "---\nZ";
+    page_draw(px, width, height, 0, 0, width, height, rule, strlen(rule), strlen(rule), strlen(rule), font_px);
+    expect(near_rgb(px, width, height, PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B), "a rule draws a bar");
+
+    const char *task = "- [x] H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, task, strlen(task), strlen(task), strlen(task), font_px);
+    expect(count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B) > 16, "a task draws a box");
+
+    const char *setext = "Hello\n===\nZ";
+    page_set_source(0);
+    page_draw(px, width, height, 0, 0, width, height, setext, strlen(setext), strlen(setext), strlen(setext), font_px);
+    int setext_rendered = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_set_source(1);
+    page_draw(px, width, height, 0, 0, width, height, setext, strlen(setext), strlen(setext), strlen(setext), font_px);
+    int setext_source = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    expect(setext_rendered > 0 && setext_source > setext_rendered, "source mode shows the setext marks");
+    page_set_source(0);
+
+    const char *hashes = "# H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, hashes, strlen(hashes), strlen(hashes), strlen(hashes), font_px);
+    int hybrid = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_set_source(1);
+    page_draw(px, width, height, 0, 0, width, height, hashes, strlen(hashes), strlen(hashes), strlen(hashes), font_px);
+    int sourced = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    expect(sourced > hybrid, "source mode shows the heading marks");
+    page_set_source(0);
+
+    const char *bare = "| A | B |\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bare, strlen(bare), strlen(bare), strlen(bare), font_px);
+    expect(count_exact(px, width, height, PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B) == 0, "a pipe row without a delimiter is not a table");
+
+    const char *table = "| Name | Qty |\n| --- | ---: |\n| fig | 2 |\nZ";
+    page_draw(px, width, height, 0, 0, width, height, table, strlen(table), strlen(table), strlen(table), font_px);
+    int table_grid = count_exact(px, width, height, PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B);
+    int table_head = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_draw(px, width, height, 0, 0, width, height, table, strlen(table), 0, 0, font_px);
+    int table_source = count_exact(px, width, height, PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B);
+    expect(table_grid > 40 && table_grid > table_source, "a rendered table draws a grid");
+    expect(table_head > 0, "a rendered table header is a heading");
+
+    const char *struck = "~~H~~\nZ";
+    page_draw(px, width, height, 0, 0, width, height, struck, strlen(struck), strlen(struck), strlen(struck), font_px);
+    expect(count_exact(px, width, height, PAGE_STRIKE_R, PAGE_STRIKE_G, PAGE_STRIKE_B) > 4, "a strike draws a line");
+
+    const char *image = "![A](u)\nZ";
+    page_draw(px, width, height, 0, 0, width, height, image, strlen(image), 0, 0, font_px);
+    int image_source = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            image_source += ink_at(px, width, x, y);
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, image, strlen(image), strlen(image), strlen(image), font_px);
+    int image_rendered = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            image_rendered += ink_at(px, width, x, y);
+        }
+    }
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an image shows its alt text");
+    expect(image_source > image_rendered, "a rendered image hides the markup");
+
+    const char *tilde = "~~~\na\n~~~\nZ";
+    page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), 4, 4, font_px);
+    int tilde_source = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), strlen(tilde), strlen(tilde), font_px);
+    int tilde_rendered = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    expect(tilde_rendered > 0 && tilde_rendered < tilde_source, "a tilde fence hides its ticks");
+
+    const char *flat = "- H\nZ";
+    const char *nested = "    - H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, flat, strlen(flat), strlen(flat), strlen(flat), font_px);
+    int flat_x = width;
+    page_draw(px, width, height, 0, 0, width, height, nested, strlen(nested), strlen(nested), strlen(nested), font_px);
+    int nested_x = width;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            size_t i = ((size_t)y * (size_t)width + (size_t)x) * 4;
+            if (px[i] == PAGE_LIST_R && px[i + 1] == PAGE_LIST_G && px[i + 2] == PAGE_LIST_B && x < nested_x) {
+                nested_x = x;
+            }
+        }
+    }
+    memset(px, 0, (size_t)width * (size_t)height * 4);
+    page_draw(px, width, height, 0, 0, width, height, flat, strlen(flat), strlen(flat), strlen(flat), font_px);
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            size_t i = ((size_t)y * (size_t)width + (size_t)x) * 4;
+            if (px[i] == PAGE_LIST_R && px[i + 1] == PAGE_LIST_G && px[i + 2] == PAGE_LIST_B && x < flat_x) {
+                flat_x = x;
+            }
+        }
+    }
+    expect(nested_x > flat_x, "a nested list indents its bullet");
+    free(px);
+}
+
+static void test_selection_paint(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "selection font");
+    const int width = 480;
+    const int height = 160;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "selection alloc");
+    if (px == NULL) {
+        return;
+    }
+    page_draw(px, width, height, 0, 0, width, height, "X Y", 3, 2, 1, 32);
+    expect(near_rgb(px, width, height, PAGE_SEL_R, PAGE_SEL_G, PAGE_SEL_B), "selection covers the space");
+    page_draw(px, width, height, 0, 0, width, height, "X Y", 3, 3, 3, 32);
+    expect(!near_rgb(px, width, height, PAGE_SEL_R, PAGE_SEL_G, PAGE_SEL_B), "no selection paints no wash");
+    free(px);
+}
+
+static void test_label(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "label font");
+    const int width = 400;
+    const int height = 200;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "label alloc");
+    if (px == NULL) {
+        return;
+    }
+    int xs[] = {40};
+    int ys[] = {30};
+    int ws[] = {200};
+    int hs[] = {80};
+    const char *labels[] = {"Font"};
+    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, labels, 0, 32);
+    expect(near_rgb(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B), "a label is drawn");
+    expect(px[0] == 0 && px[1] == 0 && px[2] == 0, "a label stays inside its cell");
+    free(px);
+}
+
+static void test_modes(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "modes font");
+    const int width = 240;
+    const int height = 400;
+    const int font_px = 32;
+    const int n = 40;
+    char *text = malloc((size_t)n);
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(text != NULL && px != NULL, "modes alloc");
+    if (text == NULL || px == NULL) {
+        free(text);
+        free(px);
+        return;
+    }
+    memset(text, '\n', (size_t)n);
+    page_set_typewriter(1);
+    page_draw(px, width, height, 0, 0, width, height, text, (size_t)n, (size_t)n, (size_t)n, font_px);
+    int above = 0;
+    int below = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!ink_at(px, width, x, y)) {
+                continue;
+            }
+            if (y < height / 2) {
+                above++;
+            } else {
+                below++;
+            }
+        }
+    }
+    expect(above > 0 && below > 0, "typewriter keeps the caret in the middle");
+    memset(px, 0, (size_t)width * (size_t)height * 4);
+    page_draw(px, width, height, 0, 0, width, height, text, (size_t)n, 0, 0, font_px);
+    int top = 0;
+    int mid = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!ink_at(px, width, x, y)) {
+                continue;
+            }
+            if (y < height / 3) {
+                top++;
+            } else if (y > height / 3 && y < height * 2 / 3) {
+                mid++;
+            }
+        }
+    }
+    expect(mid > top, "the first line sits in the center band");
+    expect(page_center_drag(100000) > 0, "a downward drag of the text moves later rows");
+    expect(page_center_drag(-100000) < 0, "an upward drag of the text moves earlier rows");
+    page_set_typewriter(0);
+
+    const char *head = "# H\nZ";
+    page_set_focus(0);
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), strlen(head), strlen(head), font_px);
+    int bright = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_set_focus(1);
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), strlen(head), strlen(head), font_px);
+    int dim = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    expect(bright > 0 && dim < bright, "focus dims every line but the caret line");
+    page_set_focus(0);
+
+    page_set_theme(1);
+    page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
+    expect(px[0] == PAGE_NIGHT_PAPER_R && px[1] == PAGE_NIGHT_PAPER_G && px[2] == PAGE_NIGHT_PAPER_B,
+           "night paper");
+    expect(near_rgb(px, width, height, PAGE_NIGHT_INK_R, PAGE_NIGHT_INK_G, PAGE_NIGHT_INK_B), "night ink");
+    page_set_theme(0);
+    free(text);
+    free(px);
+}
+
+static void test_scroll(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "set font again");
+    const int width = 200;
+    const int height = 400;
+    char text[64];
+    int n = 0;
+    for (int i = 0; i < 40; i++) {
+        text[n++] = '\n';
+    }
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    page_draw(px, width, height, 0, 0, width, height, text, (size_t)n, (size_t)n, (size_t)n, 32);
+    int ink = 0;
+    int above = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!ink_at(px, width, x, y)) {
+                continue;
+            }
+            ink++;
+            if (y < height / 2) {
+                above++;
+            }
+        }
+    }
+    expect(ink > 8, "scrolled caret is visible");
+    expect(above == 0, "scrolled caret is in the lower half");
     free(px);
 }
 
 int main(void) {
-    test_one_to_one();
-    test_scale();
+    int font_len = 0;
+    unsigned char *font = load_font(&font_len);
+    if (font != NULL) {
+        test_caret_and_glyph(font, font_len);
+        test_hit(font, font_len);
+        test_user_scroll(font, font_len);
+        test_markdown(font, font_len);
+        test_rendered(font, font_len);
+        test_modes(font, font_len);
+        test_label(font, font_len);
+        test_selection_paint(font, font_len);
+        test_tall_note(font, font_len);
+        test_scroll(font, font_len);
+        free(font);
+    }
     if (fail) {
         return 1;
     }

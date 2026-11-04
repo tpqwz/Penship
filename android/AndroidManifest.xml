@@ -8,12 +8,13 @@
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
 
     <application
-        android:hasCode="false"
         android:extractNativeLibs="true"
         android:debuggable="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="penship">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="penship.Pen"
             android:label="penship"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density"
@@ -22,6 +23,82 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Text the provider already labeled, including markdown. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/markdown" />
+                <data android:mimeType="application/x-markdown" />
+            </intent-filter>
+            <!-- A markdown or text name, whatever mime the provider used. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathSuffix=".md" />
+                <data android:pathSuffix=".MD" />
+                <data android:pathSuffix=".markdown" />
+                <data android:pathSuffix=".mdown" />
+                <data android:pathSuffix=".mkd" />
+                <data android:pathSuffix=".mkdn" />
+                <data android:pathSuffix=".mdwn" />
+                <data android:pathSuffix=".mdtxt" />
+                <data android:pathSuffix=".mdtext" />
+                <data android:pathSuffix=".mdx" />
+                <data android:pathSuffix=".qmd" />
+                <data android:pathSuffix=".rmd" />
+                <data android:pathSuffix=".Rmd" />
+                <data android:pathSuffix=".myst" />
+                <data android:pathSuffix=".txt" />
+                <data android:pathSuffix=".TXT" />
+                <data android:pathSuffix=".text" />
+                <data android:pathPattern=".*\\.md" />
+                <data android:pathPattern=".*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.md" />
+                <data android:pathPattern=".*\\.markdown" />
+                <data android:pathPattern=".*\\..*\\.markdown" />
+                <data android:pathPattern=".*\\..*\\..*\\.markdown" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.markdown" />
+                <data android:pathPattern=".*\\.txt" />
+                <data android:pathPattern=".*\\..*\\.txt" />
+                <data android:pathPattern=".*\\..*\\..*\\.txt" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.txt" />
+            </intent-filter>
+            <!-- The same names when the sender sets no mime type. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathSuffix=".md" />
+                <data android:pathSuffix=".MD" />
+                <data android:pathSuffix=".markdown" />
+                <data android:pathSuffix=".mdown" />
+                <data android:pathSuffix=".mkd" />
+                <data android:pathSuffix=".mkdn" />
+                <data android:pathSuffix=".mdwn" />
+                <data android:pathSuffix=".mdtxt" />
+                <data android:pathSuffix=".mdtext" />
+                <data android:pathSuffix=".mdx" />
+                <data android:pathSuffix=".qmd" />
+                <data android:pathSuffix=".rmd" />
+                <data android:pathSuffix=".Rmd" />
+                <data android:pathSuffix=".myst" />
+                <data android:pathSuffix=".txt" />
+                <data android:pathSuffix=".TXT" />
+                <data android:pathSuffix=".text" />
             </intent-filter>
         </activity>
     </application>

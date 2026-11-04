@@ -1,0 +1,520 @@
+package penship;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+
+/**
+ * NativeActivity plus the open-with document. Schemes are an allowlist:
+ * content goes through the URI grant, and a file URI cannot overwrite the
+ * app's private data directory.
+ */
+public class Pen extends android.app.NativeActivity {
+    /** Same cap as DOC_MAX_BYTES. A longer stream is refused whole. */
+    private static final int CAP = 1 << 22;
+
+    /* NativeActivity dlopens the library. The VM only resolves these natives after loadLibrary. */
+    static {
+        System.loadLibrary("penship");
+    }
+
+    /** Document from the last successful read. Saves keep using it if a new intent arrives first. */
+    private static Uri opened;
+
+    static final String IME_TAG = "penship-ime";
+
+    @Override
+    protected void onCreate(android.os.Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        android.view.View content = findViewById(android.R.id.content);
+        if (!(content instanceof android.view.ViewGroup)) {
+            return;
+        }
+        android.view.ViewGroup group = (android.view.ViewGroup) content;
+        if (group.findViewWithTag(IME_TAG) != null) {
+            return;
+        }
+        group.addView(new ImeView(this), new android.view.ViewGroup.LayoutParams(1, 1));
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent != null) {
+            setIntent(intent);
+        }
+    }
+
+    /** The focusable editor, or null when the content view is not up yet. */
+    static android.view.View editor(Activity activity) {
+        android.view.View content = activity.findViewById(android.R.id.content);
+        if (content == null) {
+            return null;
+        }
+        return content.findViewWithTag(IME_TAG);
+    }
+
+    static void commit(String text, int composing) {
+        if (text == null) {
+            text = "";
+        }
+        /* shortcut: longer keyboard commits are dropped. The native queue also rejects past 4096 UTF-8 bytes. */
+        if (text.length() > 4096) {
+            return;
+        }
+        byte[] utf8;
+        try {
+            utf8 = text.getBytes("UTF-8");
+        } catch (java.io.UnsupportedEncodingException e) {
+            return;
+        }
+        commitBytes(utf8, composing);
+    }
+
+    private static native void commitBytes(byte[] utf8, int composing);
+
+    static native void erase(int count);
+
+    static native void eraseForward(int count);
+
+    static native void motion(int dir, int rows, int extend);
+
+    /** Matches IME_SELECT, IME_COPY, IME_CUT, and IME_PASTE in src/ime.h. */
+    static final int CLIP_SELECT = 9;
+    static final int CLIP_COPY = 10;
+    static final int CLIP_CUT = 11;
+    static final int CLIP_PASTE = 12;
+
+    static void setClipboard(Activity activity, byte[] utf8) {
+        Clip.put(activity, utf8);
+    }
+
+    static byte[] getClipboard(Activity activity) {
+        return Clip.get(activity);
+    }
+
+    static native void clip(int kind);
+
+    static native void finishComposing();
+
+    static native void undo();
+
+    static native void shortcut(int keyCode);
+
+    /** Identity of the opened document, or null when this launch is the scratch note. */
+    public static String id(Activity activity) {
+        Uri uri = document(activity);
+        if (uri == null) {
+            return null;
+        }
+        return uri.toString();
+    }
+
+    /** Bytes of the opened document. Null if this launch has none or the read is refused. */
+    public static byte[] read(Activity activity) {
+        Uri uri = document(activity);
+        if (uri == null) {
+            return null;
+        }
+        keep(activity, uri);
+        InputStream in = null;
+        try {
+            in = activity.getContentResolver().openInputStream(uri);
+            if (in == null) {
+                return null;
+            }
+            byte[] got = drain(in);
+            if (got != null) {
+                opened = uri;
+            }
+            return got;
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Write bytes back to the opened document. Returns 0, or -1 when there is
+     * nothing writable or the private data directory would be the target.
+     */
+    public static int write(Activity activity, byte[] bytes) {
+        if (bytes == null || bytes.length > CAP) {
+            return -1;
+        }
+        Uri uri = opened;
+        if (uri == null) {
+            return -1;
+        }
+        if ("file".equals(uri.getScheme())) {
+            if (insidePrivate(activity, uri)) {
+                return -1;
+            }
+            return writeFile(uri, bytes);
+        }
+        OutputStream out = null;
+        try {
+            out = activity.getContentResolver().openOutputStream(uri);
+            if (out == null) {
+                return -1;
+            }
+            out.write(bytes);
+            return 0;
+        } catch (Exception ignored) {
+            return -1;
+        } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /** Replace a file only after the new bytes are on disk. A failed write leaves the file. */
+    private static int writeFile(Uri uri, byte[] bytes) {
+        String path = uri.getPath();
+        if (path == null) {
+            return -1;
+        }
+        File tmp = new File(path + ".tmp");
+        FileOutputStream out = null;
+        try {
+            out = new FileOutputStream(tmp);
+            out.write(bytes);
+            out.close();
+            out = null;
+            if (!tmp.renameTo(new File(path))) {
+                tmp.delete();
+                return -1;
+            }
+            return 0;
+        } catch (Exception ignored) {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (IOException ignoredClose) {
+                }
+            }
+            tmp.delete();
+            return -1;
+        }
+    }
+
+    private static Uri document(Activity activity) {
+        Intent intent = activity.getIntent();
+        if (intent == null) {
+            return null;
+        }
+        String action = intent.getAction();
+        if (!Intent.ACTION_VIEW.equals(action) && !Intent.ACTION_EDIT.equals(action)) {
+            return null;
+        }
+        Uri uri = intent.getData();
+        if (uri == null && intent.getClipData() != null && intent.getClipData().getItemCount() > 0) {
+            uri = intent.getClipData().getItemAt(0).getUri();
+        }
+        if (uri == null) {
+            return null;
+        }
+        String scheme = uri.getScheme();
+        if (!"content".equals(scheme) && !"file".equals(scheme)) {
+            return null;
+        }
+        return uri;
+    }
+
+    private static void keep(Activity activity, Uri uri) {
+        if (!"content".equals(uri.getScheme())) {
+            return;
+        }
+        int flags = activity.getIntent().getFlags()
+                & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (flags == 0) {
+            return;
+        }
+        try {
+            activity.getContentResolver().takePersistableUriPermission(uri, flags);
+        } catch (SecurityException ignored) {
+        }
+    }
+
+    private static byte[] drain(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int total = 0;
+        while (true) {
+            int n = in.read(buf);
+            if (n < 0) {
+                break;
+            }
+            if (n == 0) {
+                continue;
+            }
+            if (total > CAP - n) {
+                return null;
+            }
+            out.write(buf, 0, n);
+            total += n;
+        }
+        return out.toByteArray();
+    }
+
+    /** True when a file URI resolves inside the app's private data directory. */
+    private static boolean insidePrivate(Activity activity, Uri uri) {
+        String path = uri.getPath();
+        if (path == null) {
+            return true;
+        }
+        try {
+            String real = new File(path).getCanonicalPath();
+            String data = activity.getDataDir().getCanonicalPath();
+            return real.equals(data) || real.startsWith(data + "/");
+        } catch (IOException ignored) {
+            return true;
+        }
+    }
+}
+
+/**
+ * One-pixel focus target. NativeActivity's surface is not a text editor, so the
+ * keyboard has nothing to commit into unless this view is focused.
+ */
+class ImeView extends android.view.View {
+    ImeView(android.content.Context context) {
+        super(context);
+        setTag(Pen.IME_TAG);
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+    }
+
+    @Override
+    public boolean onCheckIsTextEditor() {
+        return true;
+    }
+
+    @Override
+    public boolean onKeyPreIme(int keyCode, android.view.KeyEvent event) {
+        /* Gboard takes hardware keys once this view is the editor. Claim the editing keys here. */
+        if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) {
+            return false;
+        }
+        if (!event.isCtrlPressed() && keyCode == android.view.KeyEvent.KEYCODE_FORWARD_DEL) {
+            Pen.eraseForward(1);
+            return true;
+        }
+        if (!event.isCtrlPressed()) {
+            int dir = 0;
+            int rows = 0;
+            if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                dir = -1;
+            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                dir = 1;
+            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP) {
+                dir = -1;
+                rows = 1;
+            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN) {
+                dir = 1;
+                rows = 1;
+            }
+            if (dir != 0) {
+                Pen.motion(dir, rows, event.isShiftPressed() ? 1 : 0);
+                return true;
+            }
+            return false;
+        }
+        if (event.getRepeatCount() != 0) {
+            return false;
+        }
+        if (!event.isShiftPressed()) {
+            if (keyCode == android.view.KeyEvent.KEYCODE_A) {
+                Pen.clip(Pen.CLIP_SELECT);
+                return true;
+            }
+            if (keyCode == android.view.KeyEvent.KEYCODE_C) {
+                Pen.clip(Pen.CLIP_COPY);
+                return true;
+            }
+            if (keyCode == android.view.KeyEvent.KEYCODE_X) {
+                Pen.clip(Pen.CLIP_CUT);
+                return true;
+            }
+            if (keyCode == android.view.KeyEvent.KEYCODE_V) {
+                Pen.clip(Pen.CLIP_PASTE);
+                return true;
+            }
+        }
+        if (!event.isShiftPressed() && keyCode == android.view.KeyEvent.KEYCODE_Z) {
+            android.util.Log.i("penship", "ime undo");
+            Pen.undo();
+            return true;
+        }
+        if (event.isShiftPressed() && (keyCode == android.view.KeyEvent.KEYCODE_T
+                || keyCode == android.view.KeyEvent.KEYCODE_F
+                || keyCode == android.view.KeyEvent.KEYCODE_P
+                || keyCode == android.view.KeyEvent.KEYCODE_S)) {
+            android.util.Log.i("penship", "ime shortcut " + keyCode);
+            Pen.shortcut(keyCode);
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public android.view.inputmethod.InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo outAttrs) {
+        outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        outAttrs.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
+                | android.view.inputmethod.EditorInfo.IME_ACTION_NONE;
+        return new PenInput(this);
+    }
+}
+
+/** Keyboard commits land here and are queued for the native thread. */
+class PenInput extends android.view.inputmethod.BaseInputConnection {
+    PenInput(android.view.View view) {
+        super(view, true);
+    }
+
+    @Override
+    public boolean commitText(CharSequence text, int newCursorPosition) {
+        Pen.commit(text == null ? "" : text.toString(), 0);
+        return true;
+    }
+
+    @Override
+    public boolean setComposingText(CharSequence text, int newCursorPosition) {
+        Pen.commit(text == null ? "" : text.toString(), 1);
+        return true;
+    }
+
+    @Override
+    public boolean finishComposingText() {
+        Pen.finishComposing();
+        return super.finishComposingText();
+    }
+
+    @Override
+    public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+        /* shortcut: the count is UTF-16 units and is applied as code points. */
+        eraseAround(beforeLength, afterLength);
+        return true;
+    }
+
+    @Override
+    public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+        eraseAround(beforeLength, afterLength);
+        return true;
+    }
+
+    private static void eraseAround(int beforeLength, int afterLength) {
+        if (beforeLength > 0) {
+            Pen.erase(beforeLength);
+        }
+        if (afterLength > 0) {
+            Pen.eraseForward(afterLength);
+        }
+    }
+}
+
+/** Clipboard hops. A clip longer than 1 MiB is ignored. */
+final class Clip implements Runnable {
+    private static final int PUT = 1;
+    private static final int GET = 2;
+    private static final int CAP = 1 << 20;
+
+    private final Activity activity;
+    private final int mode;
+    private final byte[] in;
+    private final byte[][] out;
+    private final java.util.concurrent.CountDownLatch latch;
+
+    private Clip(Activity activity, int mode, byte[] in, byte[][] out, java.util.concurrent.CountDownLatch latch) {
+        this.activity = activity;
+        this.mode = mode;
+        this.in = in;
+        this.out = out;
+        this.latch = latch;
+    }
+
+    static void put(Activity activity, byte[] utf8) {
+        if (activity == null || utf8 == null || utf8.length == 0 || utf8.length > CAP) {
+            return;
+        }
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        activity.runOnUiThread(new Clip(activity, PUT, utf8, null, latch));
+        await(latch);
+    }
+
+    static byte[] get(Activity activity) {
+        if (activity == null) {
+            return null;
+        }
+        byte[][] out = new byte[1][];
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        activity.runOnUiThread(new Clip(activity, GET, null, out, latch));
+        await(latch);
+        return out[0];
+    }
+
+    private static void await(java.util.concurrent.CountDownLatch latch) {
+        try {
+            latch.await(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
+    public void run() {
+        try {
+            android.content.ClipboardManager clips =
+                    (android.content.ClipboardManager) activity.getSystemService(Activity.CLIPBOARD_SERVICE);
+            if (clips == null) {
+                return;
+            }
+            if (mode == PUT) {
+                String text = new String(in, "UTF-8");
+                clips.setPrimaryClip(android.content.ClipData.newPlainText("penship", text));
+                return;
+            }
+            if (!clips.hasPrimaryClip()) {
+                return;
+            }
+            android.content.ClipData data = clips.getPrimaryClip();
+            if (data == null || data.getItemCount() < 1) {
+                return;
+            }
+            CharSequence raw = data.getItemAt(0).coerceToText(activity);
+            if (raw == null) {
+                return;
+            }
+            String text = raw.toString();
+            if (text.length() == 0 || text.length() > CAP) {
+                return;
+            }
+            byte[] utf8 = text.getBytes("UTF-8");
+            if (utf8.length <= CAP) {
+                out[0] = utf8;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            latch.countDown();
+        }
+    }
+}

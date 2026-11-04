@@ -1,12 +1,24 @@
+#include "chrome.h"
+#include "doc.h"
+#include "ime.h"
 #include "page.h"
+#include "utf8.h"
 
+#include <android/asset_manager.h>
+#include <android/configuration.h>
+#include <android/input.h>
+#include <android/keycodes.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+#include <jni.h>
 
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define LOG_TAG "penship"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -34,8 +46,24 @@ static const char *FRAG =
     "  gl_FragColor = texture2D(uTex, vUv);\n"
     "}\n";
 
+enum { SESSION_NONE = 0, SESSION_NOTE = 1, SESSION_URI = 2, SESSION_FAILED = 3 };
+
 struct App {
     struct android_app *android;
+    JNIEnv *env;
+    Doc *doc;
+    char path[1024];
+    char copy_path[1024];
+    char open_id[2048];
+    int session;
+    unsigned char *fonts[3];
+    int font_lens[3];
+    int face;
+    int step;
+    int compose_n;
+    size_t compose_end;
+    struct Chrome chrome;
+    int font_px;
     EGLDisplay display;
     EGLSurface surface;
     EGLContext context;
@@ -45,6 +73,14 @@ struct App {
     int32_t height;
     uint8_t *pixels;
     int ready;
+    int drag;
+    int drag_x;
+    int drag_y;
+    int drag_last;
+    int drag_mode;
+    int edge;
+    int edge_x;
+    int edge_y;
 };
 
 static GLuint compile_shader(GLenum type, const char *source) {
@@ -168,8 +204,8 @@ static int start_gl(struct App *app) {
     app->program = link_program();
     glGenTextures(1, &app->texture);
     glBindTexture(GL_TEXTURE_2D, app->texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glClearColor(PAGE_PAPER_R / 255.f, PAGE_PAPER_G / 255.f, PAGE_PAPER_B / 255.f, 1.f);
@@ -177,8 +213,10 @@ static int start_gl(struct App *app) {
     return 1;
 }
 
-static void draw(struct App *app) {
-    if (!app->ready) {
+static void read_insets(struct App *app, int *top, int *bottom);
+
+static void render(struct App *app) {
+    if (!app->ready || app->doc == NULL) {
         return;
     }
     EGLint width = 0;
@@ -198,12 +236,29 @@ static void draw(struct App *app) {
         app->pixels = pixels;
         app->width = width;
         app->height = height;
-        page_draw(app->pixels, width, height);
-        glBindTexture(GL_TEXTURE_2D, app->texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, app->pixels);
-        LOGI("page %d x %d", width, height);
     }
+    int inset_top = 0;
+    int inset_bottom = 0;
+    read_insets(app, &inset_top, &inset_bottom);
+    int density = 160;
+    if (app->android != NULL && app->android->config != NULL) {
+        density = AConfiguration_getDensity(app->android->config);
+    }
+    app->font_px = text_px(density, app->step);
+    chrome_place(&app->chrome, width, height, inset_top, inset_bottom, density);
+    size_t len = 0;
+    const char *text = doc_text(app->doc, &len);
+    page_draw(app->pixels, width, height, app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
+              app->chrome.text_h, text, len, doc_caret(app->doc), doc_anchor(app->doc), app->font_px);
+    const char *labels[CHROME_COUNT];
+    for (int i = 0; i < CHROME_COUNT; i++) {
+        labels[i] = chrome_label(i);
+    }
+    page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
+                     app->chrome.h, labels, app->chrome.vertical, text_px(density, 0));
     glViewport(0, 0, width, height);
+    glBindTexture(GL_TEXTURE_2D, app->texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, app->pixels);
     glClear(GL_COLOR_BUFFER_BIT);
     if (app->program != 0) {
         glUseProgram(app->program);
@@ -218,27 +273,901 @@ static void draw(struct App *app) {
     eglSwapBuffers(app->display, app->surface);
 }
 
+static int write_uri(struct App *app);
+
+static void save_doc(struct App *app) {
+    if (app->doc == NULL) {
+        return;
+    }
+    if (app->session == SESSION_URI) {
+        if (write_uri(app) == 0) {
+            return;
+        }
+        /* shortcut: a read-only open saves files/opened.md and is not merged back later. */
+        LOGE("save to opened file failed");
+        if (app->copy_path[0] != '\0' && doc_save(app->doc, app->copy_path) != 0) {
+            LOGE("save copy failed");
+        }
+        return;
+    }
+    if (app->session == SESSION_NOTE && app->path[0] != '\0' && doc_save(app->doc, app->path) != 0) {
+        LOGE("save failed");
+    }
+}
+
+static JNIEnv *jni_env(struct App *app) {
+    if (app->env != NULL) {
+        return app->env;
+    }
+    JavaVM *vm = app->android->activity->vm;
+    JNIEnv *env = NULL;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) {
+        LOGE("attach failed");
+        return NULL;
+    }
+    app->env = env;
+    return env;
+}
+
+static int jni_ok(JNIEnv *env) {
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    return 1;
+}
+
+static jclass load_class(struct App *app, JNIEnv *env, const char *class_name) {
+    jobject activity = app->android->activity->clazz;
+    if (activity == NULL) {
+        return NULL;
+    }
+    jclass activity_class = (*env)->GetObjectClass(env, activity);
+    jmethodID get_loader =
+        activity_class != NULL ? (*env)->GetMethodID(env, activity_class, "getClassLoader", "()Ljava/lang/ClassLoader;") : NULL;
+    jobject loader = NULL;
+    if (jni_ok(env) && get_loader != NULL) {
+        loader = (*env)->CallObjectMethod(env, activity, get_loader);
+    }
+    jclass found = NULL;
+    if (jni_ok(env) && loader != NULL) {
+        jclass loader_class = (*env)->GetObjectClass(env, loader);
+        jmethodID load = (*env)->GetMethodID(env, loader_class, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+        jstring name = (*env)->NewStringUTF(env, class_name);
+        if (jni_ok(env) && load != NULL && name != NULL) {
+            found = (jclass)(*env)->CallObjectMethod(env, loader, load, name);
+        }
+        if (!jni_ok(env)) {
+            found = NULL;
+        }
+        (*env)->DeleteLocalRef(env, name);
+        (*env)->DeleteLocalRef(env, loader_class);
+    }
+    (*env)->DeleteLocalRef(env, loader);
+    (*env)->DeleteLocalRef(env, activity_class);
+    return found;
+}
+
+static void show_keyboard(struct App *app) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL) {
+        return;
+    }
+    jclass keyboard = load_class(app, env, "penship.Keyboard");
+    if (keyboard == NULL) {
+        LOGE("keyboard class missing");
+        return;
+    }
+    jmethodID show = (*env)->GetStaticMethodID(env, keyboard, "show", "(Landroid/app/Activity;)V");
+    if (jni_ok(env) && show != NULL) {
+        (*env)->CallStaticVoidMethod(env, keyboard, show, app->android->activity->clazz);
+        jni_ok(env);
+    }
+    (*env)->DeleteLocalRef(env, keyboard);
+}
+
+static void read_insets(struct App *app, int *top, int *bottom) {
+    *top = 0;
+    *bottom = 0;
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL) {
+        return;
+    }
+    jclass keyboard = load_class(app, env, "penship.Keyboard");
+    if (keyboard == NULL) {
+        return;
+    }
+    jmethodID insets = (*env)->GetStaticMethodID(env, keyboard, "insets", "(Landroid/app/Activity;)[I");
+    jintArray values = NULL;
+    if (jni_ok(env) && insets != NULL) {
+        values = (jintArray)(*env)->CallStaticObjectMethod(env, keyboard, insets, app->android->activity->clazz);
+    }
+    if (jni_ok(env) && values != NULL && (*env)->GetArrayLength(env, values) >= 2) {
+        jint pair[2];
+        (*env)->GetIntArrayRegion(env, values, 0, 2, pair);
+        *top = pair[0];
+        *bottom = pair[1];
+    }
+    (*env)->DeleteLocalRef(env, values);
+    (*env)->DeleteLocalRef(env, keyboard);
+}
+
+/* 1 and the id is written, 0 when this launch is the scratch note, -1 on failure. */
+static int copy_id(struct App *app, char *buf, size_t cap) {
+    buf[0] = '\0';
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL || cap == 0) {
+        return -1;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return -1;
+    }
+    jmethodID id = (*env)->GetStaticMethodID(env, pen, "id", "(Landroid/app/Activity;)Ljava/lang/String;");
+    jstring value = NULL;
+    if (jni_ok(env) && id != NULL) {
+        value = (jstring)(*env)->CallStaticObjectMethod(env, pen, id, app->android->activity->clazz);
+    }
+    int kind = -1;
+    if (jni_ok(env)) {
+        if (value == NULL) {
+            kind = 0;
+        } else {
+            jsize n = (*env)->GetStringUTFLength(env, value);
+            if (n >= 0 && (size_t)n < cap) {
+                const char *chars = (*env)->GetStringUTFChars(env, value, NULL);
+                if (chars != NULL) {
+                    memcpy(buf, chars, (size_t)n);
+                    buf[n] = '\0';
+                    (*env)->ReleaseStringUTFChars(env, value, chars);
+                    kind = 1;
+                }
+            }
+        }
+    }
+    (*env)->DeleteLocalRef(env, value);
+    (*env)->DeleteLocalRef(env, pen);
+    return kind;
+}
+
+static int read_uri(struct App *app, char **out, size_t *out_n) {
+    *out = NULL;
+    *out_n = 0;
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL) {
+        return -1;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return -1;
+    }
+    jmethodID read = (*env)->GetStaticMethodID(env, pen, "read", "(Landroid/app/Activity;)[B");
+    jbyteArray array = NULL;
+    if (jni_ok(env) && read != NULL) {
+        array = (jbyteArray)(*env)->CallStaticObjectMethod(env, pen, read, app->android->activity->clazz);
+    }
+    int rc = -1;
+    if (jni_ok(env) && array != NULL) {
+        jsize n = (*env)->GetArrayLength(env, array);
+        if (n >= 0 && (size_t)n <= DOC_MAX_BYTES) {
+            char *bytes = malloc((size_t)n + 1);
+            if (bytes != NULL) {
+                if (n > 0) {
+                    (*env)->GetByteArrayRegion(env, array, 0, n, (jbyte *)bytes);
+                }
+                if (jni_ok(env)) {
+                    bytes[n] = '\0';
+                    *out = bytes;
+                    *out_n = (size_t)n;
+                    rc = 0;
+                } else {
+                    free(bytes);
+                }
+            }
+        }
+    }
+    (*env)->DeleteLocalRef(env, array);
+    (*env)->DeleteLocalRef(env, pen);
+    return rc;
+}
+
+static int write_uri(struct App *app) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL || app->doc == NULL) {
+        return -1;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return -1;
+    }
+    jmethodID write = (*env)->GetStaticMethodID(env, pen, "write", "(Landroid/app/Activity;[B)I");
+    size_t len = 0;
+    const char *text = doc_text(app->doc, &len);
+    jbyteArray array = NULL;
+    int rc = -1;
+    if (jni_ok(env) && write != NULL && len <= DOC_MAX_BYTES) {
+        array = (*env)->NewByteArray(env, (jsize)len);
+        if (jni_ok(env) && array != NULL && len > 0) {
+            (*env)->SetByteArrayRegion(env, array, 0, (jsize)len, (const jbyte *)text);
+        }
+        if (jni_ok(env) && array != NULL) {
+            rc = (*env)->CallStaticIntMethod(env, pen, write, app->android->activity->clazz, array);
+            if (!jni_ok(env)) {
+                rc = -1;
+            }
+        }
+    }
+    (*env)->DeleteLocalRef(env, array);
+    (*env)->DeleteLocalRef(env, pen);
+    return rc;
+}
+
+/* Load the opened document, or the scratch note when the launch has none. */
+static int refresh_session(struct App *app) {
+    char id[sizeof app->open_id];
+    int kind = copy_id(app, id, sizeof id);
+    if (kind < 0) {
+        LOGE("intent failed");
+        if (app->session != SESSION_NONE) {
+            return -1;
+        }
+        kind = 0;
+    }
+    if (kind == 1) {
+        if ((app->session == SESSION_URI || app->session == SESSION_FAILED) && strcmp(id, app->open_id) == 0) {
+            return 0;
+        }
+        char *bytes = NULL;
+        size_t n = 0;
+        if (read_uri(app, &bytes, &n) != 0 || doc_load_bytes(app->doc, bytes, n) != 0) {
+            free(bytes);
+            doc_load_bytes(app->doc, "", 0);
+            memcpy(app->open_id, id, strlen(id) + 1);
+            app->session = SESSION_FAILED;
+            LOGE("open failed");
+            return 1;
+        }
+        free(bytes);
+        memcpy(app->open_id, id, strlen(id) + 1);
+        app->session = SESSION_URI;
+        LOGI("opened %zu bytes", n);
+        return 1;
+    }
+    if (app->session == SESSION_NOTE) {
+        return 0;
+    }
+    app->open_id[0] = '\0';
+    if (app->path[0] == '\0' || doc_load(app->doc, app->path) != 0) {
+        doc_load_bytes(app->doc, "", 0);
+    } else {
+        size_t len = 0;
+        doc_text(app->doc, &len);
+        LOGI("loaded %zu bytes", len);
+    }
+    app->session = SESSION_NOTE;
+    return 1;
+}
+
+/* shortcut: KeyEvent.getUnicodeChar on the virtual keyboard. Dead keys are dropped. */
+static int unicode_of(struct App *app, int key_code, int meta) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL) {
+        return 0;
+    }
+    jclass cls = (*env)->FindClass(env, "android/view/KeyEvent");
+    if (!jni_ok(env) || cls == NULL) {
+        return 0;
+    }
+    jmethodID ctor = (*env)->GetMethodID(env, cls, "<init>", "(II)V");
+    jmethodID get = (*env)->GetMethodID(env, cls, "getUnicodeChar", "(I)I");
+    if (!jni_ok(env) || ctor == NULL || get == NULL) {
+        (*env)->DeleteLocalRef(env, cls);
+        return 0;
+    }
+    jobject event = (*env)->NewObject(env, cls, ctor, AKEY_EVENT_ACTION_DOWN, key_code);
+    int ch = 0;
+    if (jni_ok(env) && event != NULL) {
+        ch = (*env)->CallIntMethod(env, event, get, meta);
+        if (!jni_ok(env)) {
+            ch = 0;
+        }
+    }
+    if ((ch & 0x80000000) != 0) {
+        ch = 0;
+    }
+    (*env)->DeleteLocalRef(env, event);
+    (*env)->DeleteLocalRef(env, cls);
+    return ch;
+}
+
+enum { LOOPER_ID_IME = 4 };
+
+static int g_ime_fd[2] = {-1, -1};
+
+static void ime_wake(void) {
+    if (g_ime_fd[1] < 0) {
+        return;
+    }
+    char byte = 1;
+    if (write(g_ime_fd[1], &byte, 1) < 0) {
+        /* The glue thread drains the pipe. A full pipe means it is already awake. */
+    }
+}
+
+static int codepoints_of(const char *bytes, size_t n) {
+    int count = 0;
+    size_t i = 0;
+    while (i < n) {
+        unsigned cp = 0;
+        int k = utf8_decode(bytes + i, n - i, &cp);
+        if (k < 0) {
+            break;
+        }
+        i += (size_t)k;
+        count++;
+    }
+    return count;
+}
+
+/* Drop the open composition. Returns 1 when bytes were removed. */
+static int clear_composition(struct App *app) {
+    int cleared = 0;
+    if (app->compose_n > 0 && doc_anchor(app->doc) == doc_caret(app->doc) &&
+        doc_caret(app->doc) == app->compose_end) {
+        doc_move(app->doc, 0);
+        doc_extend(app->doc, -app->compose_n);
+        if (doc_backspace(app->doc) == 0) {
+            cleared = 1;
+        }
+    }
+    app->compose_n = 0;
+    return cleared;
+}
+
+enum { CLIP_MAX = 1 << 20 };
+
+static void selection_bounds(const Doc *doc, size_t *lo, size_t *hi) {
+    size_t anchor = doc_anchor(doc);
+    size_t caret = doc_caret(doc);
+    *lo = anchor < caret ? anchor : caret;
+    *hi = anchor < caret ? caret : anchor;
+}
+
+static int copy_selection(struct App *app) {
+    size_t lo = 0;
+    size_t hi = 0;
+    selection_bounds(app->doc, &lo, &hi);
+    if (lo == hi || hi - lo > CLIP_MAX || app->android->activity->clazz == NULL) {
+        return 0;
+    }
+    JNIEnv *env = jni_env(app);
+    if (env == NULL) {
+        return 0;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return 0;
+    }
+    jmethodID set = (*env)->GetStaticMethodID(env, pen, "setClipboard", "(Landroid/app/Activity;[B)V");
+    jbyteArray array = NULL;
+    if (jni_ok(env) && set != NULL && hi - lo <= (size_t)0x7fffffff) {
+        array = (*env)->NewByteArray(env, (jsize)(hi - lo));
+    }
+    int copied = 0;
+    if (jni_ok(env) && array != NULL) {
+        const char *text = doc_text(app->doc, NULL);
+        (*env)->SetByteArrayRegion(env, array, 0, (jsize)(hi - lo), (const jbyte *)(text + lo));
+        if (jni_ok(env)) {
+            (*env)->CallStaticVoidMethod(env, pen, set, app->android->activity->clazz, array);
+            copied = jni_ok(env);
+        }
+    }
+    (*env)->DeleteLocalRef(env, array);
+    (*env)->DeleteLocalRef(env, pen);
+    return copied;
+}
+
+static int paste_clip(struct App *app) {
+    if (app->android->activity->clazz == NULL) {
+        return 0;
+    }
+    JNIEnv *env = jni_env(app);
+    if (env == NULL) {
+        return 0;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return 0;
+    }
+    jmethodID get = (*env)->GetStaticMethodID(env, pen, "getClipboard", "(Landroid/app/Activity;)[B");
+    jbyteArray array = NULL;
+    if (jni_ok(env) && get != NULL) {
+        array = (jbyteArray)(*env)->CallStaticObjectMethod(env, pen, get, app->android->activity->clazz);
+    }
+    int changed = 0;
+    if (jni_ok(env) && array != NULL) {
+        jsize n = (*env)->GetArrayLength(env, array);
+        if (jni_ok(env) && n > 0 && n <= CLIP_MAX) {
+            jbyte *bytes = (*env)->GetByteArrayElements(env, array, NULL);
+            if (bytes != NULL) {
+                changed = doc_insert(app->doc, (const char *)bytes, (size_t)n) == 0;
+                (*env)->ReleaseByteArrayElements(env, array, bytes, JNI_ABORT);
+            }
+        }
+    }
+    if (!jni_ok(env)) {
+        changed = 0;
+    }
+    (*env)->DeleteLocalRef(env, array);
+    (*env)->DeleteLocalRef(env, pen);
+    return changed;
+}
+
+static void apply_ime(struct App *app) {
+    if (app->doc == NULL) {
+        return;
+    }
+    struct ImeOp op;
+    int changed = 0;
+    while (ime_take(&op) == 0) {
+        if (op.kind == IME_FINISH) {
+            app->compose_n = 0;
+        } else if (op.kind == IME_UNDO) {
+            app->compose_n = 0;
+            if (doc_undo(app->doc) == 0) {
+                changed = 1;
+            }
+        } else if (op.kind == IME_SHORTCUT) {
+            if (op.count == AKEYCODE_T) {
+                page_set_typewriter(!page_typewriter());
+            } else if (op.count == AKEYCODE_F) {
+                page_set_focus(!page_focus());
+            } else if (op.count == AKEYCODE_P) {
+                page_set_theme(page_theme() == 0 ? 1 : 0);
+            } else if (op.count == AKEYCODE_S) {
+                page_set_source(!page_source());
+            }
+            render(app);
+        } else if (op.kind == IME_SELECT) {
+            app->compose_n = 0;
+            doc_select_all(app->doc);
+            page_set_follow(1);
+            changed = 1;
+        } else if (op.kind == IME_COPY) {
+            copy_selection(app);
+        } else if (op.kind == IME_CUT) {
+            app->compose_n = 0;
+            if (copy_selection(app) && doc_backspace(app->doc) == 0) {
+                changed = 1;
+            }
+        } else if (op.kind == IME_PASTE) {
+            app->compose_n = 0;
+            if (paste_clip(app)) {
+                changed = 1;
+            }
+        } else if (op.kind == IME_ERASE || op.kind == IME_FORWARD) {
+            app->compose_n = 0;
+            for (int i = 0; i < op.count; i++) {
+                int rc = op.kind == IME_FORWARD ? doc_delete(app->doc) : doc_backspace(app->doc);
+                if (rc != 0) {
+                    break;
+                }
+                changed = 1;
+            }
+        } else if (op.kind == IME_MOVE || op.kind == IME_ROW) {
+            page_set_follow(1);
+            if (op.composing) {
+                if (op.kind == IME_ROW) {
+                    doc_extend_row(app->doc, op.count);
+                } else {
+                    doc_extend(app->doc, op.count);
+                }
+            } else if (op.kind == IME_ROW) {
+                doc_move_row(app->doc, op.count);
+            } else {
+                doc_move(app->doc, op.count);
+            }
+            render(app);
+        } else if (op.kind == IME_TEXT) {
+            if (clear_composition(app)) {
+                changed = 1;
+            }
+            if (op.n > 0 && doc_insert(app->doc, op.bytes, op.n) == 0) {
+                changed = 1;
+                if (op.composing) {
+                    app->compose_n = codepoints_of(op.bytes, op.n);
+                    app->compose_end = doc_caret(app->doc);
+                }
+            }
+        }
+        free(op.bytes);
+    }
+    if (changed) {
+        save_doc(app);
+        page_set_follow(1);
+        render(app);
+        size_t len = 0;
+        doc_text(app->doc, &len);
+        LOGI("ime len=%zu caret=%zu", len, doc_caret(app->doc));
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_commitBytes(JNIEnv *env, jclass cls, jbyteArray array, jint composing) {
+    (void)cls;
+    if (array == NULL) {
+        return;
+    }
+    jsize n = (*env)->GetArrayLength(env, array);
+    if (n < 0 || n > IME_TEXT_MAX) {
+        return;
+    }
+    jbyte *bytes = n == 0 ? NULL : (*env)->GetByteArrayElements(env, array, NULL);
+    if (n > 0 && bytes == NULL) {
+        return;
+    }
+    int rc = ime_push_text(n == 0 ? "" : (const char *)bytes, (size_t)n, composing);
+    if (bytes != NULL) {
+        (*env)->ReleaseByteArrayElements(env, array, bytes, JNI_ABORT);
+    }
+    if (rc == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_erase(JNIEnv *env, jclass cls, jint count) {
+    (void)env;
+    (void)cls;
+    if (ime_push_erase(count) == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_eraseForward(JNIEnv *env, jclass cls, jint count) {
+    (void)env;
+    (void)cls;
+    if (ime_push_forward(count) == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_motion(JNIEnv *env, jclass cls, jint dir, jint rows, jint extend) {
+    (void)env;
+    (void)cls;
+    int rc = rows ? ime_push_row(dir, extend) : ime_push_move(dir, extend);
+    if (rc == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_finishComposing(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    if (ime_push_finish() == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_undo(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    if (ime_push_undo() == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_shortcut(JNIEnv *env, jclass cls, jint code) {
+    (void)env;
+    (void)cls;
+    if (code != AKEYCODE_T && code != AKEYCODE_F && code != AKEYCODE_P && code != AKEYCODE_S) {
+        return;
+    }
+    if (ime_push_shortcut(code) == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_clip(JNIEnv *env, jclass cls, jint kind) {
+    (void)env;
+    (void)cls;
+    if (ime_push_clip(kind) == 0) {
+        ime_wake();
+    }
+}
+
+static int on_input(struct android_app *android, AInputEvent *event) {
+    struct App *app = android->userData;
+    if (app->doc == NULL) {
+        return 0;
+    }
+    int type = AInputEvent_getType(event);
+    if (type == AINPUT_EVENT_TYPE_MOTION) {
+        int action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+        int x = (int)AMotionEvent_getX(event, 0);
+        int y = (int)AMotionEvent_getY(event, 0);
+        if (action == AMOTION_EVENT_ACTION_DOWN) {
+            if (chrome_hit(&app->chrome, x, y) >= 0) {
+                app->drag = 0;
+                return 0;
+            }
+            app->drag = 1;
+            app->drag_x = x;
+            app->drag_y = y;
+            app->drag_last = y;
+            app->drag_mode = 0;
+            app->edge = 0;
+            return 1;
+        }
+        if (action == AMOTION_EVENT_ACTION_CANCEL) {
+            app->drag = 0;
+            app->edge = 0;
+            return 1;
+        }
+        if (action == AMOTION_EVENT_ACTION_MOVE && app->drag) {
+            int dx = x - app->drag_x;
+            int dy = y - app->drag_y;
+            if (dx < 0) {
+                dx = -dx;
+            }
+            if (dy < 0) {
+                dy = -dy;
+            }
+            /* shortcut: a drag scrolls, unless it starts on the caret, which selects. No fling. */
+            if (app->drag_mode == 0 && (dx > 36 || dy > 36)) {
+                /* Centered mode keeps the caret on the middle line, so a drag moves the text. */
+                app->drag_mode = page_typewriter() ? 1 : (page_caret_near(app->drag_x, app->drag_y, 72) ? 2 : 1);
+            }
+            if (app->drag_mode == 1) {
+                int rows = page_center_drag(app->drag_last - y);
+                app->drag_last = y;
+                if (rows != 0) {
+                    int step = rows > 0 ? 1 : -1;
+                    int n = rows > 0 ? rows : -rows;
+                    for (int i = 0; i < n; i++) {
+                        doc_move_row(app->doc, step);
+                    }
+                    app->compose_n = 0;
+                }
+                render(app);
+            } else if (app->drag_mode == 2) {
+                size_t len = 0;
+                const char *text = doc_text(app->doc, &len);
+                doc_seek(app->doc, page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
+                                            app->chrome.text_h, text, len, doc_caret(app->doc), app->font_px, x, y));
+                app->compose_n = 0;
+                app->edge = page_edge(y, app->chrome.text_y, app->chrome.text_y + app->chrome.text_h, 72);
+                app->edge_x = x;
+                app->edge_y = y;
+                render(app);
+            }
+            return 1;
+        }
+        if (action == AMOTION_EVENT_ACTION_UP) {
+            int dragged = app->drag && app->drag_mode != 0;
+            int selecting = app->drag_mode == 2;
+            app->drag = 0;
+            app->edge = 0;
+            if (dragged) {
+                if (selecting) {
+                    show_keyboard(app);
+                }
+                return 1;
+            }
+            int hit = chrome_hit(&app->chrome, x, y);
+            if (hit == CHROME_SMALLER && app->step > 0) {
+                app->step--;
+            } else if (hit == CHROME_LARGER && app->step + 1 < text_step_count()) {
+                app->step++;
+            } else if (hit == CHROME_FONT) {
+                for (int n = 0; n < 3; n++) {
+                    app->face = (app->face + 1) % 3;
+                    if (app->fonts[app->face] != NULL && page_set_font(app->fonts[app->face], app->font_lens[app->face]) == 0) {
+                        break;
+                    }
+                }
+            } else if (hit == CHROME_TYPEWRITER) {
+                page_set_typewriter(!page_typewriter());
+            } else if (hit == CHROME_FOCUS) {
+                page_set_focus(!page_focus());
+            } else if (hit == CHROME_THEME) {
+                page_set_theme(page_theme() == 0 ? 1 : 0);
+            } else if (hit == CHROME_SOURCE) {
+                page_set_source(!page_source());
+            } else {
+                size_t len = 0;
+                const char *text = doc_text(app->doc, &len);
+                size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h,
+                                     text, len, doc_caret(app->doc), app->font_px, x, y);
+                doc_place(app->doc, at);
+                app->compose_n = 0;
+                page_set_follow(1);
+                render(app);
+                show_keyboard(app);
+                return 1;
+            }
+            render(app);
+            return 1;
+        }
+        return 0;
+    }
+    if (type != AINPUT_EVENT_TYPE_KEY || AKeyEvent_getAction(event) != AKEY_EVENT_ACTION_DOWN) {
+        return 0;
+    }
+    int code = AKeyEvent_getKeyCode(event);
+    int meta = AKeyEvent_getMetaState(event);
+    int shift = (meta & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) != 0;
+    int ctrl = (meta & (AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON)) != 0;
+    if (code == AKEYCODE_BACK) {
+        return 0;
+    }
+    if (ctrl && shift &&
+        (code == AKEYCODE_T || code == AKEYCODE_F || code == AKEYCODE_P || code == AKEYCODE_S)) {
+        if (code == AKEYCODE_T) {
+            page_set_typewriter(!page_typewriter());
+        } else if (code == AKEYCODE_F) {
+            page_set_focus(!page_focus());
+        } else if (code == AKEYCODE_S) {
+            page_set_source(!page_source());
+        } else {
+            page_set_theme(page_theme() == 0 ? 1 : 0);
+        }
+        render(app);
+        return 1;
+    }
+    if (ctrl && !shift && code == AKEYCODE_A) {
+        app->compose_n = 0;
+        doc_select_all(app->doc);
+        page_set_follow(1);
+        render(app);
+        return 1;
+    }
+    if (ctrl && !shift && code == AKEYCODE_C) {
+        copy_selection(app);
+        return 1;
+    }
+    if (ctrl && !shift && code == AKEYCODE_X) {
+        app->compose_n = 0;
+        if (copy_selection(app) && doc_backspace(app->doc) == 0) {
+            save_doc(app);
+            page_set_follow(1);
+            render(app);
+        }
+        return 1;
+    }
+    if (ctrl && !shift && code == AKEYCODE_V) {
+        app->compose_n = 0;
+        if (paste_clip(app)) {
+            save_doc(app);
+            page_set_follow(1);
+            render(app);
+        }
+        return 1;
+    }
+    if (ctrl && code == AKEYCODE_Z) {
+        if (doc_undo(app->doc) == 0) {
+            save_doc(app);
+            page_set_follow(1);
+            render(app);
+        }
+        return 1;
+    }
+    if (code == AKEYCODE_DEL || code == AKEYCODE_FORWARD_DEL) {
+        app->compose_n = 0;
+        int rc = code == AKEYCODE_FORWARD_DEL ? doc_delete(app->doc) : doc_backspace(app->doc);
+        if (rc == 0) {
+            save_doc(app);
+            page_set_follow(1);
+            render(app);
+        }
+        return 1;
+    }
+    if (code == AKEYCODE_DPAD_LEFT) {
+        if (shift) {
+            doc_extend(app->doc, -1);
+        } else {
+            doc_move(app->doc, -1);
+        }
+        page_set_follow(1);
+        render(app);
+        return 1;
+    }
+    if (code == AKEYCODE_DPAD_RIGHT) {
+        if (shift) {
+            doc_extend(app->doc, 1);
+        } else {
+            doc_move(app->doc, 1);
+        }
+        page_set_follow(1);
+        render(app);
+        return 1;
+    }
+    if (code == AKEYCODE_DPAD_UP) {
+        if (shift) {
+            doc_extend_row(app->doc, -1);
+        } else {
+            doc_move_row(app->doc, -1);
+        }
+        page_set_follow(1);
+        render(app);
+        return 1;
+    }
+    if (code == AKEYCODE_DPAD_DOWN) {
+        if (shift) {
+            doc_extend_row(app->doc, 1);
+        } else {
+            doc_move_row(app->doc, 1);
+        }
+        page_set_follow(1);
+        render(app);
+        return 1;
+    }
+    int ch = unicode_of(app, code, AKeyEvent_getMetaState(event));
+    if (ch <= 0 || (unsigned)ch > 0x10ffff) {
+        return 0;
+    }
+    app->compose_n = 0;
+    char bytes[4];
+    int n = utf8_encode((unsigned)ch, bytes);
+    if (n < 0 || doc_insert(app->doc, bytes, (size_t)n) != 0) {
+        return 1;
+    }
+    save_doc(app);
+    page_set_follow(1);
+    render(app);
+    size_t len = 0;
+    doc_text(app->doc, &len);
+    LOGI("edit len=%zu caret=%zu", len, doc_caret(app->doc));
+    return 1;
+}
+
 static void on_cmd(struct android_app *android, int32_t cmd) {
     struct App *app = android->userData;
     switch (cmd) {
     case APP_CMD_INIT_WINDOW:
         if (start_gl(app)) {
-            draw(app);
+            render(app);
         }
         break;
     case APP_CMD_TERM_WINDOW:
         stop_gl(app);
         break;
+    case APP_CMD_GAINED_FOCUS:
+        show_keyboard(app);
+        render(app);
+        break;
+    case APP_CMD_PAUSE:
+        save_doc(app);
+        break;
+    case APP_CMD_RESUME:
+        refresh_session(app);
+        render(app);
+        break;
     case APP_CMD_WINDOW_RESIZED:
     case APP_CMD_WINDOW_REDRAW_NEEDED:
     case APP_CMD_CONTENT_RECT_CHANGED:
-    case APP_CMD_GAINED_FOCUS:
-    case APP_CMD_RESUME:
-        draw(app);
+    case APP_CMD_CONFIG_CHANGED:
+        render(app);
         break;
     default:
         break;
     }
+}
+
+static unsigned char *load_asset(AAssetManager *manager, const char *name, int *len) {
+    AAsset *asset = AAssetManager_open(manager, name, AASSET_MODE_BUFFER);
+    if (asset == NULL) {
+        LOGE("missing asset %s", name);
+        return NULL;
+    }
+    int n = (int)AAsset_getLength(asset);
+    unsigned char *bytes = n > 0 ? malloc((size_t)n) : NULL;
+    int got = bytes != NULL ? AAsset_read(asset, bytes, (size_t)n) : -1;
+    AAsset_close(asset);
+    if (got != n) {
+        free(bytes);
+        return NULL;
+    }
+    *len = n;
+    return bytes;
 }
 
 void android_main(struct android_app *android) {
@@ -248,16 +1177,81 @@ void android_main(struct android_app *android) {
     app.display = EGL_NO_DISPLAY;
     app.surface = EGL_NO_SURFACE;
     app.context = EGL_NO_CONTEXT;
+    app.doc = doc_new();
+    if (app.doc == NULL) {
+        LOGE("doc_new failed");
+        return;
+    }
+    app.step = text_step_default();
+    int density = 160;
+    if (android->config != NULL) {
+        density = AConfiguration_getDensity(android->config);
+    }
+    app.font_px = text_px(density, app.step);
+    const char *dir = android->activity->internalDataPath;
+    if (dir != NULL) {
+        int wrote = snprintf(app.path, sizeof app.path, "%s/note.md", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.path) {
+            app.path[0] = '\0';
+        }
+        wrote = snprintf(app.copy_path, sizeof app.copy_path, "%s/opened.md", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.copy_path) {
+            app.copy_path[0] = '\0';
+        }
+    }
+    refresh_session(&app);
+    static const char *k_faces[] = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
+                                    "LiberationMono-Regular.ttf"};
+    for (int i = 0; i < 3; i++) {
+        app.fonts[i] = load_asset(android->activity->assetManager, k_faces[i], &app.font_lens[i]);
+    }
+    if (app.fonts[0] == NULL || page_set_font(app.fonts[0], app.font_lens[0]) != 0) {
+        LOGE("font failed");
+    }
     android->userData = &app;
     android->onAppCmd = on_cmd;
+    android->onInputEvent = on_input;
+    if (pipe(g_ime_fd) == 0) {
+        fcntl(g_ime_fd[0], F_SETFL, O_NONBLOCK);
+        fcntl(g_ime_fd[1], F_SETFL, O_NONBLOCK);
+        ALooper_addFd(android->looper, g_ime_fd[0], LOOPER_ID_IME, ALOOPER_EVENT_INPUT, NULL, NULL);
+    } else {
+        g_ime_fd[0] = -1;
+        g_ime_fd[1] = -1;
+    }
 
     while (!android->destroyRequested) {
         int events = 0;
         struct android_poll_source *source = NULL;
-        int ident = ALooper_pollOnce(-1, NULL, &events, (void **)&source);
-        if (ident >= 0 && source != NULL) {
+        int wait = app.edge != 0 ? 32 : -1;
+        int ident = ALooper_pollOnce(wait, NULL, &events, (void **)&source);
+        if (ident == ALOOPER_POLL_TIMEOUT && app.edge != 0 && app.drag_mode == 2) {
+            page_scroll_by(app.edge > 0 ? 64 : -64);
+            size_t len = 0;
+            const char *text = doc_text(app.doc, &len);
+            doc_seek(app.doc, page_hit(app.chrome.text_x, app.chrome.text_y, app.chrome.text_w, app.chrome.text_h, text,
+                                       len, doc_caret(app.doc), app.font_px, app.edge_x, app.edge_y));
+            app.compose_n = 0;
+            render(&app);
+        } else if (ident == LOOPER_ID_IME) {
+            char buf[32];
+            while (read(g_ime_fd[0], buf, sizeof buf) > 0) {
+            }
+            apply_ime(&app);
+        } else if (ident >= 0 && source != NULL) {
             source->process(android, source);
         }
     }
+    if (g_ime_fd[0] >= 0) {
+        close(g_ime_fd[0]);
+        close(g_ime_fd[1]);
+        g_ime_fd[0] = -1;
+        g_ime_fd[1] = -1;
+    }
+    save_doc(&app);
     stop_gl(&app);
+    doc_free(app.doc);
+    for (int i = 0; i < 3; i++) {
+        free(app.fonts[i]);
+    }
 }

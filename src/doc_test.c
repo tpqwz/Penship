@@ -1,0 +1,264 @@
+#include "doc.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int fail;
+
+static void expect(int cond, const char *msg) {
+    if (!cond) {
+        fprintf(stderr, "fail: %s\n", msg);
+        fail = 1;
+    }
+}
+
+static void test_insert_and_move(void) {
+    Doc *doc = doc_new();
+    expect(doc != NULL, "new");
+    size_t len = 99;
+    expect(doc_text(doc, &len) != NULL && len == 0, "empty");
+    expect(doc_caret(doc) == 0, "caret starts at 0");
+    expect(doc_insert(doc, "hi", 2) == 0, "insert hi");
+    expect(strcmp(doc_text(doc, &len), "hi") == 0 && len == 2, "text is hi");
+    expect(doc_caret(doc) == 2, "caret after hi");
+
+    doc_move(doc, -1);
+    expect(doc_caret(doc) == 1, "move left");
+    expect(doc_insert(doc, "X", 1) == 0, "insert X");
+    expect(strcmp(doc_text(doc, &len), "hXi") == 0, "hXi");
+    expect(doc_caret(doc) == 2, "caret after X");
+
+    doc_move(doc, -10);
+    expect(doc_caret(doc) == 0, "move clamps at the start");
+    doc_move(doc, 10);
+    expect(doc_caret(doc) == 3, "move clamps at the end");
+    expect(doc_backspace(doc) == 0, "backspace i");
+    expect(strcmp(doc_text(doc, &len), "hX") == 0, "hX");
+    doc_move(doc, -2);
+    expect(doc_backspace(doc) == -1, "backspace at start");
+    expect(strcmp(doc_text(doc, &len), "hX") == 0, "unchanged at start");
+    doc_free(doc);
+}
+
+static void test_utf8(void) {
+    Doc *doc = doc_new();
+    const char eacute[] = "\xc3\xa9";
+    expect(doc_insert(doc, eacute, 2) == 0, "insert e acute");
+    expect(doc_caret(doc) == 2, "caret after e acute");
+    doc_move(doc, -1);
+    expect(doc_caret(doc) == 0, "move left skips the whole code point");
+    doc_move(doc, 1);
+    expect(doc_backspace(doc) == 0, "backspace e acute");
+    size_t len = 1;
+    expect(doc_text(doc, &len)[0] == '\0' && len == 0, "empty after backspace");
+
+    const char emoji[] = "\xf0\x9f\x91\x8d";
+    expect(doc_insert(doc, emoji, 4) == 0, "insert emoji");
+    doc_move(doc, -1);
+    expect(doc_caret(doc) == 0, "move left across emoji");
+    doc_move(doc, 1);
+    expect(doc_backspace(doc) == 0 && doc_caret(doc) == 0, "backspace emoji");
+
+    expect(doc_insert(doc, "a", 1) == 0, "insert a");
+    expect(doc_insert(doc, "\xff", 1) == -1, "reject bare continuation");
+    expect(doc_insert(doc, "\xc0\x80", 2) == -1, "reject overlong");
+    expect(doc_insert(doc, "\xed\xa0\x80", 3) == -1, "reject surrogate");
+    expect(strcmp(doc_text(doc, &len), "a") == 0 && doc_caret(doc) == 1, "rejects leave the doc");
+    doc_free(doc);
+}
+
+static void test_delete_forward(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "ab", 2) == 0, "insert ab");
+    doc_move(doc, -2);
+    expect(doc_caret(doc) == 0, "caret at a");
+    expect(doc_delete(doc) == 0, "delete a");
+    expect(strcmp(doc_text(doc, NULL), "b") == 0 && doc_caret(doc) == 0, "b remains");
+    expect(doc_delete(doc) == 0, "delete b");
+    expect(strcmp(doc_text(doc, NULL), "") == 0 && doc_caret(doc) == 0, "empty");
+    expect(doc_delete(doc) == -1, "delete at the end");
+
+    const char emoji[] = "\xf0\x9f\x91\x8dX";
+    expect(doc_insert(doc, emoji, 5) == 0, "insert emoji and X");
+    doc_move(doc, -2);
+    expect(doc_caret(doc) == 0, "caret before the emoji");
+    expect(doc_delete(doc) == 0, "delete the emoji");
+    expect(strcmp(doc_text(doc, NULL), "X") == 0 && doc_caret(doc) == 0, "X remains");
+    expect(doc_undo(doc) == 0, "undo the forward delete");
+    expect(strcmp(doc_text(doc, NULL), emoji) == 0 && doc_caret(doc) == 0, "emoji restored");
+
+    doc_move(doc, 1);
+    doc_extend(doc, 1);
+    expect(doc_delete(doc) == 0, "delete the selection");
+    expect(strcmp(doc_text(doc, NULL), "\xf0\x9f\x91\x8d") == 0 && doc_caret(doc) == 4, "X was selected");
+    doc_free(doc);
+}
+
+static void test_place(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "hello", 5) == 0, "insert hello");
+    doc_place(doc, 2);
+    expect(doc_caret(doc) == 2 && doc_anchor(doc) == 2, "place between letters");
+    doc_extend(doc, 2);
+    expect(doc_anchor(doc) == 2 && doc_caret(doc) == 4, "selection is open");
+    doc_place(doc, 0);
+    expect(doc_caret(doc) == 0 && doc_anchor(doc) == 0, "place clears the selection");
+    doc_place(doc, 100);
+    expect(doc_caret(doc) == 5, "place clamps to the end");
+    expect(doc_load_bytes(doc, "\xf0\x9f\x91\x8dZ", 5) == 0, "emoji then Z");
+    doc_place(doc, 2);
+    expect(doc_caret(doc) == 0, "place snaps to the start of the emoji");
+    doc_place(doc, 4);
+    doc_seek(doc, 0);
+    expect(doc_anchor(doc) == 4 && doc_caret(doc) == 0, "seek keeps the anchor");
+    doc_select_all(doc);
+    expect(doc_anchor(doc) == 0 && doc_caret(doc) == 5, "select all");
+    doc_free(doc);
+}
+
+static void test_rows(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "ab\ncd", 5) == 0, "two lines");
+    expect(doc_caret(doc) == 5, "caret at end");
+    doc_move_row(doc, -1);
+    expect(doc_caret(doc) == 2, "column 2 of the first line");
+    doc_move_row(doc, -1);
+    expect(doc_caret(doc) == 0, "no previous line");
+    doc_move_row(doc, 1);
+    expect(doc_caret(doc) == 3, "column 0 of the second line");
+    doc_move(doc, 1);
+    doc_move_row(doc, 1);
+    expect(doc_caret(doc) == 5, "no next line stays at the end");
+
+    doc_free(doc);
+    doc = doc_new();
+    doc_insert(doc, "ab\nc", 4);
+    doc_move(doc, -3);
+    expect(doc_caret(doc) == 1, "on b");
+    doc_move_row(doc, 1);
+    expect(doc_caret(doc) == 4, "column clamped to the short line");
+    doc_free(doc);
+}
+
+static void test_load_bytes(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "keep", 4) == 0, "seed");
+    expect(doc_load_bytes(doc, "opened\n", 7) == 0, "load bytes");
+    size_t len = 0;
+    expect(strcmp(doc_text(doc, &len), "opened\n") == 0 && len == 7, "bytes replace the doc");
+    expect(doc_caret(doc) == 7, "caret at end of loaded bytes");
+
+    expect(doc_load_bytes(doc, "", 0) == 0, "empty file");
+    expect(doc_text(doc, &len)[0] == '\0' && len == 0 && doc_caret(doc) == 0, "empty bytes");
+    expect(doc_load_bytes(doc, NULL, 0) == 0, "null empty is an empty file");
+
+    expect(doc_load_bytes(doc, "back", 4) == 0, "restore");
+    expect(doc_load_bytes(doc, "a\xff", 2) == -1, "reject invalid utf-8 bytes");
+    expect(strcmp(doc_text(doc, &len), "back") == 0 && doc_caret(doc) == 4, "bad bytes keep the doc");
+    expect(doc_load_bytes(doc, NULL, 3) == -1, "null with a length");
+    expect(strcmp(doc_text(doc, &len), "back") == 0, "null length keeps the doc");
+    /* The pointer is short on purpose: the cap must be checked before any read. */
+    expect(doc_load_bytes(doc, "x", (size_t)DOC_MAX_BYTES + 1) == -1, "reject over 4 MiB");
+    expect(strcmp(doc_text(doc, &len), "back") == 0, "oversize keeps the doc");
+    doc_free(doc);
+}
+
+static void test_selection_and_undo(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "hello", 5) == 0, "insert hello");
+    expect(doc_caret(doc) == 5 && doc_anchor(doc) == 5, "insert leaves no selection");
+    doc_move(doc, -4);
+    expect(doc_caret(doc) == 1 && doc_anchor(doc) == 1, "move collapses to the caret");
+    doc_extend(doc, 3);
+    expect(doc_caret(doc) == 4 && doc_anchor(doc) == 1, "extend keeps the anchor");
+    expect(doc_insert(doc, "X", 1) == 0, "typing replaces the selection");
+    expect(strcmp(doc_text(doc, NULL), "hXo") == 0, "ell became X");
+    expect(doc_caret(doc) == 2 && doc_anchor(doc) == 2, "replace clears the selection");
+    expect(doc_undo(doc) == 0, "undo the replacement");
+    expect(strcmp(doc_text(doc, NULL), "hello") == 0, "hello restored");
+    expect(doc_caret(doc) == 4 && doc_anchor(doc) == 1, "selection restored");
+    expect(doc_undo(doc) == 0, "undo the original insert");
+    expect(strcmp(doc_text(doc, NULL), "") == 0 && doc_caret(doc) == 0, "document empty again");
+    expect(doc_undo(doc) == -1, "undo stops when the stack is empty");
+
+    expect(doc_insert(doc, "ab", 2) == 0, "insert ab");
+    doc_move(doc, -1);
+    doc_extend(doc, 1);
+    expect(doc_backspace(doc) == 0, "backspace deletes the selection");
+    expect(strcmp(doc_text(doc, NULL), "a") == 0 && doc_caret(doc) == 1, "b was selected");
+    expect(doc_undo(doc) == 0, "undo the selection delete");
+    expect(strcmp(doc_text(doc, NULL), "ab") == 0 && doc_anchor(doc) == 1 && doc_caret(doc) == 2, "ab selected again");
+
+    expect(doc_load_bytes(doc, "ab\ncd", 5) == 0, "two-line note");
+    doc_move(doc, -5);
+    doc_extend_row(doc, 1);
+    expect(doc_caret(doc) == 3 && doc_anchor(doc) == 0, "extend selects through the newline");
+    expect(doc_insert(doc, "Z", 1) == 0, "replace a row selection");
+    expect(strcmp(doc_text(doc, NULL), "Zcd") == 0, "row selection replaced");
+    doc_free(doc);
+
+    Doc *many = doc_new();
+    for (int i = 0; i < 33; i++) {
+        expect(doc_insert(many, "z", 1) == 0, "insert z");
+    }
+    int undone = 0;
+    while (doc_undo(many) == 0) {
+        undone++;
+    }
+    size_t len = 0;
+    expect(undone == 32, "undo keeps 32 edits");
+    expect(doc_text(many, &len)[0] == 'z' && len == 1, "the oldest insert remains");
+    expect(doc_load_bytes(many, "b", 1) == 0, "load replaces the note");
+    expect(doc_undo(many) == -1, "load clears undo");
+    expect(strcmp(doc_text(many, NULL), "b") == 0, "loaded b");
+    doc_free(many);
+}
+
+static void test_save_load(void) {
+    const char *path = "build/note-test.md";
+    Doc *doc = doc_new();
+    doc_insert(doc, "one\n", 4);
+    expect(doc_save(doc, path) == 0, "save");
+    doc_move(doc, -2);
+    doc_insert(doc, "X", 1);
+    expect(strcmp(doc_text(doc, NULL), "onXe\n") == 0, "edited after save");
+
+    Doc *loaded = doc_new();
+    expect(doc_load(loaded, path) == 0, "load");
+    size_t len = 0;
+    expect(strcmp(doc_text(loaded, &len), "one\n") == 0 && len == 4, "loaded bytes");
+    expect(doc_caret(loaded) == 4, "caret at end of load");
+    expect(doc_load(loaded, "build/missing-note.md") == -1, "missing file");
+    expect(strcmp(doc_text(loaded, &len), "one\n") == 0, "missing file keeps the doc");
+
+    expect(doc_insert(doc, "\xff", 1) == -1, "still valid");
+    FILE *bad = fopen("build/bad-note.md", "wb");
+    expect(bad != NULL, "bad file");
+    if (bad) {
+        fwrite("a\xff", 1, 2, bad);
+        fclose(bad);
+    }
+    expect(doc_load(loaded, "build/bad-note.md") == -1, "invalid utf-8 file");
+    expect(strcmp(doc_text(loaded, &len), "one\n") == 0, "bad file keeps the doc");
+    doc_free(doc);
+    doc_free(loaded);
+    remove(path);
+    remove("build/bad-note.md");
+}
+
+int main(void) {
+    test_insert_and_move();
+    test_utf8();
+    test_delete_forward();
+    test_place();
+    test_rows();
+    test_load_bytes();
+    test_selection_and_undo();
+    test_save_load();
+    if (fail) {
+        return 1;
+    }
+    puts("doc_test ok");
+    return 0;
+}
