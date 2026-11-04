@@ -59,6 +59,13 @@ int page_typewriter(void);
 int page_focus(void);
 int page_source(void);
 
+/* Counts from the last page_draw. A word is a run of ASCII letters, digits, or bytes at or above 128. */
+int page_words(void);
+int page_lines(void);
+
+/* Byte offset of the next or previous heading. dir is 1 or -1. Returns from when there is none. */
+size_t page_heading(const char *text, size_t len, size_t from, int dir);
+
 /* ttf must stay alive for every later page_draw. Returns 0, or -1 if it is not a TrueType font. */
 int page_set_font(const unsigned char *ttf, int len);
 

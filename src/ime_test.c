@@ -75,6 +75,9 @@ static void test_limits(void) {
     expect(ime_push_clip(IME_PASTE) == 0, "queue a paste");
     expect(ime_take(&op) == 0 && op.kind == IME_PASTE, "paste comes back");
     expect(ime_push_clip(1) == -1, "reject a text op as a clip");
+    expect(ime_push_heading(1) == 0, "queue a heading jump");
+    expect(ime_take(&op) == 0 && op.kind == IME_HEADING && op.count == 1, "heading jump comes back");
+    expect(ime_push_heading(0) == -1, "reject a zero heading jump");
 }
 
 int main(void) {

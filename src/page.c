@@ -34,6 +34,8 @@ static int g_bar_h;
 static int g_pad;
 static int g_line_h = 1;
 static int g_drag_px;
+static int g_words;
+static int g_lines;
 
 static void consider(size_t at, int gx, int row) {
     if (!g_seek || row != g_seek_row) {
@@ -138,6 +140,67 @@ int page_focus(void) {
 
 int page_source(void) {
     return g_source;
+}
+
+int page_words(void) {
+    return g_words;
+}
+
+int page_lines(void) {
+    return g_lines;
+}
+
+static int is_heading(const char *s, size_t n);
+static int is_setext(const char *s, size_t n);
+
+size_t page_heading(const char *text, size_t len, size_t from, int dir) {
+    if (text == NULL) {
+        text = "";
+        len = 0;
+    }
+    if (from > len) {
+        from = len;
+    }
+    size_t best = from;
+    int found = 0;
+    size_t i = 0;
+    while (i <= len) {
+        size_t off = i;
+        while (i < len && text[i] != '\n') {
+            i++;
+        }
+        size_t n = i - off;
+        int head = is_heading(text + off, n);
+        if (!head && n > 0 && i < len && text[i] == '\n') {
+            size_t a = i + 1;
+            size_t b = a;
+            while (b < len && text[b] != '\n') {
+                b++;
+            }
+            if (is_setext(text + a, b - a)) {
+                head = 1;
+            }
+        }
+        if (head && off != from) {
+            if (dir > 0 && off > from && (!found || off < best)) {
+                best = off;
+                found = 1;
+            }
+            if (dir < 0 && off < from && (!found || off > best)) {
+                best = off;
+                found = 1;
+            }
+        }
+        if (dir > 0 && found) {
+            break;
+        }
+        if (i < len && text[i] == '\n') {
+            i++;
+        } else {
+            break;
+        }
+    }
+    return best;
 }
 
 int page_theme(void) {
@@ -1028,16 +1091,28 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
                        int line_h, int space_px, float scale) {
     idx->caret_x = origin_x;
     idx->caret_y = 0;
+    g_words = 0;
+    g_lines = 0;
     int fence = 0;
     int next_underline = 0;
     size_t i = 0;
     uint64_t y = 0;
     while (i <= text_len) {
         size_t off = i;
+        int in_word = 0;
         while (i < text_len && text[i] != '\n') {
+            unsigned char c = (unsigned char)text[i];
+            int wordish = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 128;
+            if (!wordish) {
+                in_word = 0;
+            } else if (!in_word) {
+                g_words++;
+                in_word = 1;
+            }
             i++;
         }
         size_t content = i - off;
+        g_lines++;
         int kind = 0;
         if (next_underline) {
             kind = KIND_HEAD;

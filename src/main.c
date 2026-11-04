@@ -250,6 +250,19 @@ static void render(struct App *app) {
     const char *text = doc_text(app->doc, &len);
     page_draw(app->pixels, width, height, app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
               app->chrome.text_h, text, len, doc_caret(app->doc), doc_anchor(app->doc), app->font_px);
+    char stat[48];
+    int words = page_words();
+    snprintf(stat, sizeof stat, words == 1 ? "1 word" : "%d words", words);
+    const char *stat_label = stat;
+    int stat_px = text_px(density, 0);
+    int stat_w = stat_px * 8;
+    if (stat_w > app->chrome.text_w) {
+        stat_w = app->chrome.text_w;
+    }
+    int stat_x = app->chrome.text_x + app->chrome.text_w - stat_w;
+    int stat_y = app->chrome.text_y;
+    int stat_h = stat_px + 4;
+    page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px);
     const char *labels[CHROME_COUNT];
     for (int i = 0; i < CHROME_COUNT; i++) {
         labels[i] = chrome_label(i);
@@ -745,6 +758,24 @@ static void apply_ime(struct App *app) {
             if (paste_clip(app)) {
                 changed = 1;
             }
+        } else if (op.kind == IME_TAB) {
+            int rc = doc_table_tab(app->doc, op.count);
+            if (rc >= 0) {
+                app->compose_n = 0;
+                page_set_follow(1);
+                if (rc > 0) {
+                    save_doc(app);
+                }
+                render(app);
+            }
+        } else if (op.kind == IME_HEADING) {
+            size_t len = 0;
+            const char *text = doc_text(app->doc, &len);
+            size_t at = page_heading(text, len, doc_caret(app->doc), op.count);
+            doc_place(app->doc, at);
+            app->compose_n = 0;
+            page_set_follow(1);
+            render(app);
         } else if (op.kind == IME_ERASE || op.kind == IME_FORWARD) {
             app->compose_n = 0;
             for (int i = 0; i < op.count; i++) {
@@ -866,6 +897,22 @@ JNIEXPORT void JNICALL Java_penship_Pen_shortcut(JNIEnv *env, jclass cls, jint c
     }
 }
 
+JNIEXPORT void JNICALL Java_penship_Pen_tableTab(JNIEnv *env, jclass cls, jint dir) {
+    (void)env;
+    (void)cls;
+    if (ime_push_tab(dir) == 0) {
+        ime_wake();
+    }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_heading(JNIEnv *env, jclass cls, jint dir) {
+    (void)env;
+    (void)cls;
+    if (ime_push_heading(dir) == 0) {
+        ime_wake();
+    }
+}
+
 JNIEXPORT void JNICALL Java_penship_Pen_clip(JNIEnv *env, jclass cls, jint kind) {
     (void)env;
     (void)cls;
@@ -977,6 +1024,12 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 const char *text = doc_text(app->doc, &len);
                 size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h,
                                      text, len, doc_caret(app->doc), app->font_px, x, y);
+                if (doc_toggle_task(app->doc, at) == 0) {
+                    save_doc(app);
+                    page_set_follow(1);
+                    render(app);
+                    return 1;
+                }
                 doc_place(app->doc, at);
                 app->compose_n = 0;
                 page_set_follow(1);
@@ -1050,6 +1103,18 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         }
         return 1;
     }
+    if (code == AKEYCODE_TAB) {
+        int rc = doc_table_tab(app->doc, shift ? -1 : 1);
+        if (rc >= 0) {
+            app->compose_n = 0;
+            page_set_follow(1);
+            if (rc > 0) {
+                save_doc(app);
+            }
+            render(app);
+        }
+        return 1;
+    }
     if (code == AKEYCODE_DEL || code == AKEYCODE_FORWARD_DEL) {
         app->compose_n = 0;
         int rc = code == AKEYCODE_FORWARD_DEL ? doc_delete(app->doc) : doc_backspace(app->doc);
@@ -1058,6 +1123,16 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             page_set_follow(1);
             render(app);
         }
+        return 1;
+    }
+    if (ctrl && !shift && (code == AKEYCODE_DPAD_UP || code == AKEYCODE_DPAD_DOWN)) {
+        size_t len = 0;
+        const char *text = doc_text(app->doc, &len);
+        size_t at = page_heading(text, len, doc_caret(app->doc), code == AKEYCODE_DPAD_DOWN ? 1 : -1);
+        doc_place(app->doc, at);
+        app->compose_n = 0;
+        page_set_follow(1);
+        render(app);
         return 1;
     }
     if (code == AKEYCODE_DPAD_LEFT) {

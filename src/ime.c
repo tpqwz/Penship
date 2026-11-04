@@ -110,6 +110,20 @@ int ime_push_undo(void) {
     return push_plain(IME_UNDO, 0, 0);
 }
 
+int ime_push_tab(int dir) {
+    if (dir != -1 && dir != 1) {
+        return -1;
+    }
+    return push_plain(IME_TAB, 0, dir);
+}
+
+int ime_push_heading(int dir) {
+    if (dir != -1 && dir != 1) {
+        return -1;
+    }
+    return push_plain(IME_HEADING, 0, dir);
+}
+
 int ime_push_clip(int kind) {
     if (kind != IME_SELECT && kind != IME_COPY && kind != IME_CUT && kind != IME_PASTE) {
         return -1;

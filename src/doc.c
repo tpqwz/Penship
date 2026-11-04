@@ -300,6 +300,321 @@ void doc_select_all(Doc *doc) {
     doc->caret = doc->len;
 }
 
+int doc_toggle_task(Doc *doc, size_t byte_off) {
+    if (doc == NULL || byte_off > doc->len) {
+        return -1;
+    }
+    size_t start = byte_off;
+    while (start > 0 && doc->bytes[start - 1] != '\n') {
+        start--;
+    }
+    size_t i = start;
+    size_t limit = start + 24;
+    if (limit > doc->len) {
+        limit = doc->len;
+    }
+    while (i < limit && doc->bytes[i] == ' ') {
+        i++;
+    }
+    if (i + 4 >= doc->len) {
+        return -1;
+    }
+    char mark = doc->bytes[i];
+    if (!((mark == '-' || mark == '+' || mark == '*') && doc->bytes[i + 1] == ' ' && doc->bytes[i + 2] == '[')) {
+        return -1;
+    }
+    size_t box = i + 3;
+    if (box + 1 >= doc->len || doc->bytes[box + 1] != ']') {
+        return -1;
+    }
+    char c = doc->bytes[box];
+    if (c != ' ' && c != 'x' && c != 'X') {
+        return -1;
+    }
+    if (byte_off > box + 1) {
+        return -1;
+    }
+    char next = c == ' ' ? 'x' : ' ';
+    return splice(doc, box, 1, &next, 1);
+}
+
+static int line_has_pipe(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '|') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cell_is_delim(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    size_t end = n;
+    while (end > i && (s[end - 1] == ' ' || s[end - 1] == '\t')) {
+        end--;
+    }
+    if (i >= end) {
+        return 0;
+    }
+    if (s[i] == ':') {
+        i++;
+    }
+    size_t dashes = 0;
+    while (i < end && s[i] == '-') {
+        dashes++;
+        i++;
+    }
+    if (i < end && s[i] == ':') {
+        i++;
+    }
+    return i == end && dashes >= 1;
+}
+
+static int row_is_delim(const char *s, size_t n, int *cols) {
+    if (!line_has_pipe(s, n)) {
+        return 0;
+    }
+    int count = 0;
+    int any = 0;
+    size_t i = 0;
+    while (i < n && s[i] != '|') {
+        i++;
+    }
+    while (i < n) {
+        i++;
+        size_t start = i;
+        while (i < n && s[i] != '|') {
+            i++;
+        }
+        if (i == n && start == i) {
+            break;
+        }
+        if (!cell_is_delim(s + start, i - start)) {
+            return 0;
+        }
+        any = 1;
+        count++;
+        if (i >= n) {
+            break;
+        }
+    }
+    if (!any) {
+        return 0;
+    }
+    if (cols != NULL) {
+        *cols = count;
+    }
+    return 1;
+}
+
+static int cell_starts(const char *s, size_t n, size_t *out, int cap) {
+    int count = 0;
+    size_t i = 0;
+    while (i < n && s[i] != '|') {
+        i++;
+    }
+    while (i < n && count < cap) {
+        i++;
+        if (i >= n) {
+            break;
+        }
+        if (s[i] == ' ') {
+            i++;
+        }
+        out[count++] = i;
+        while (i < n && s[i] != '|') {
+            i++;
+        }
+    }
+    return count;
+}
+
+int doc_table_tab(Doc *doc, int dir) {
+    if (doc == NULL || (dir != 1 && dir != -1) || doc->bytes == NULL) {
+        return -1;
+    }
+    size_t caret = doc->caret;
+    if (caret > doc->len) {
+        caret = doc->len;
+    }
+    size_t line = caret;
+    while (line > 0 && doc->bytes[line - 1] != '\n') {
+        line--;
+    }
+    size_t lend = line;
+    while (lend < doc->len && doc->bytes[lend] != '\n') {
+        lend++;
+    }
+    if (!line_has_pipe(doc->bytes + line, lend - line)) {
+        return -1;
+    }
+    size_t first = line;
+    while (first > 0) {
+        size_t prev_end = first - 1;
+        size_t prev = prev_end;
+        while (prev > 0 && doc->bytes[prev - 1] != '\n') {
+            prev--;
+        }
+        if (!line_has_pipe(doc->bytes + prev, prev_end - prev)) {
+            break;
+        }
+        first = prev;
+    }
+    size_t last = line;
+    size_t last_end = lend;
+    size_t scan = lend;
+    while (scan < doc->len && doc->bytes[scan] == '\n') {
+        size_t next = scan + 1;
+        size_t next_end = next;
+        while (next_end < doc->len && doc->bytes[next_end] != '\n') {
+            next_end++;
+        }
+        if (!line_has_pipe(doc->bytes + next, next_end - next)) {
+            break;
+        }
+        last = next;
+        last_end = next_end;
+        scan = next_end;
+    }
+    int cols = 0;
+    int saw_delim = 0;
+    for (size_t at = first; at <= last;) {
+        size_t end = at;
+        while (end < doc->len && doc->bytes[end] != '\n') {
+            end++;
+        }
+        int n = 0;
+        if (row_is_delim(doc->bytes + at, end - at, &n)) {
+            saw_delim = 1;
+            cols = n;
+        }
+        if (at == last) {
+            break;
+        }
+        if (end < doc->len && doc->bytes[end] == '\n') {
+            at = end + 1;
+        } else {
+            break;
+        }
+    }
+    if (!saw_delim || cols < 1) {
+        return -1;
+    }
+    int on_delim = row_is_delim(doc->bytes + line, lend - line, NULL);
+    size_t starts[8];
+    int ncells = 0;
+    if (!on_delim) {
+        ncells = cell_starts(doc->bytes + line, lend - line, starts, 8);
+        for (int c = 0; c < ncells; c++) {
+            starts[c] += line;
+        }
+    }
+    int index = -1;
+    if (!on_delim) {
+        for (int c = 0; c < ncells; c++) {
+            if (starts[c] <= caret) {
+                index = c;
+            }
+        }
+    }
+    if (dir > 0 && !on_delim && index + 1 < ncells) {
+        doc_place(doc, starts[index + 1]);
+        return 0;
+    }
+    if (dir < 0 && !on_delim && index > 0) {
+        doc_place(doc, starts[index - 1]);
+        return 0;
+    }
+    size_t neighbor = line;
+    size_t neighbor_end = lend;
+    if (dir > 0) {
+        size_t at = lend < doc->len && doc->bytes[lend] == '\n' ? lend + 1 : doc->len;
+        while (at <= last) {
+            size_t end = at;
+            while (end < doc->len && doc->bytes[end] != '\n') {
+                end++;
+            }
+            if (!row_is_delim(doc->bytes + at, end - at, NULL)) {
+                neighbor = at;
+                neighbor_end = end;
+                break;
+            }
+            if (at == last) {
+                neighbor = doc->len;
+                break;
+            }
+            if (end < doc->len && doc->bytes[end] == '\n') {
+                at = end + 1;
+            } else {
+                neighbor = doc->len;
+                break;
+            }
+        }
+        if (neighbor == line) {
+            neighbor = doc->len;
+        }
+    } else {
+        size_t at = first;
+        size_t prev_body = doc->len;
+        size_t prev_end = 0;
+        while (at < line) {
+            size_t end = at;
+            while (end < doc->len && doc->bytes[end] != '\n') {
+                end++;
+            }
+            if (!row_is_delim(doc->bytes + at, end - at, NULL)) {
+                prev_body = at;
+                prev_end = end;
+            }
+            if (end < doc->len && doc->bytes[end] == '\n') {
+                at = end + 1;
+            } else {
+                break;
+            }
+        }
+        if (prev_body == doc->len) {
+            return -1;
+        }
+        neighbor = prev_body;
+        neighbor_end = prev_end;
+    }
+    if (dir > 0 && neighbor == doc->len) {
+        if (cols > 8) {
+            cols = 8;
+        }
+        char buf[64];
+        size_t n = 0;
+        buf[n++] = '\n';
+        for (int c = 0; c < cols; c++) {
+            if (n + 2 >= sizeof buf) {
+                break;
+            }
+            buf[n++] = '|';
+            buf[n++] = ' ';
+        }
+        if (n + 1 >= sizeof buf) {
+            return -1;
+        }
+        buf[n++] = '|';
+        if (splice(doc, last_end, 0, buf, n) != 0) {
+            return -1;
+        }
+        doc_place(doc, last_end + 2);
+        return 1;
+    }
+    size_t land[8];
+    int land_n = cell_starts(doc->bytes + neighbor, neighbor_end - neighbor, land, 8);
+    if (land_n < 1) {
+        return -1;
+    }
+    int pick = dir > 0 ? 0 : land_n - 1;
+    doc_place(doc, neighbor + land[pick]);
+    return 0;
+}
+
 void doc_extend(Doc *doc, int codepoints) {
     move_caret(doc, codepoints);
 }

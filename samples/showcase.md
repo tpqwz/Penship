@@ -9,7 +9,7 @@ The caret line stays source, so the marks you are editing remain visible. Every 
 
 ## How to read this note
 
-Drag the page to move. Tap to put the caret on a line. Drag from the caret to select. Ctrl+A selects everything, Ctrl+C copies, Ctrl+X cuts, and Ctrl+V pastes. Arrow keys are here for testing and for a keyboard: left and right step one character, up and down step one row, and Shift extends the selection.
+The corner counts words from the same pass that measures lines. Ctrl and up or down jumps to the next heading. Tap a task box to check it. Tab steps through a table, and Tab on the last cell adds a row. Drag the page to move. Tap to put the caret on a line. Drag from the caret to select. Ctrl+A selects everything, Ctrl+C copies, Ctrl+X cuts, and Ctrl+V pastes. Arrow keys are here for testing and for a keyboard: left and right step one character, up and down step one row, and Shift extends the selection.
 
 *Italic words* sit in the same line as their stars. **Strong words** use two stars. A ~~struck phrase~~ carries a line through the words. `inline code` keeps its ticks on this line only. An image shows its words, as in ![a small ship](ship.png), and hides the address when you are not on that line.
 
@@ -33,7 +33,7 @@ A link looks like [the penship note](https://penship.app) and is painted as a li
 - [x] Paint headings, emphasis, code, links, lists, quotes, and fences.
 - [x] Paint rules, tasks, setext headings, pipe tables, and images as their alt text.
 - [x] Draw a line through struck words, and indent a nested list.
-- [ ] Move between table cells with Tab, and add a row from the keyboard.
+- [x] Move between table cells with Tab. Tab on the last cell adds a row.
 - [ ] Draw pictures and math, and export.
 
 ## A quotation

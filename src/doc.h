@@ -36,6 +36,14 @@ void doc_seek(Doc *doc, size_t byte_off);
 /* Select the whole document. */
 void doc_select_all(Doc *doc);
 
+/* Flip the checkbox when byte_off lies on a task marker. Returns 0, or -1. */
+int doc_toggle_task(Doc *doc, size_t byte_off);
+
+/* Move to the next or previous table cell. dir is 1 or -1.
+   Tab off the last cell adds an empty row and returns 1. A move returns 0.
+   Returns -1 when the caret is not in a table. */
+int doc_table_tab(Doc *doc, int dir);
+
 /* Move the caret and keep the anchor, so the selection grows or shrinks. */
 void doc_extend(Doc *doc, int codepoints);
 

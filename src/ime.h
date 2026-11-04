@@ -4,7 +4,8 @@
 #include <stddef.h>
 
 enum { IME_TEXT = 1, IME_ERASE = 2, IME_FINISH = 3, IME_UNDO = 4, IME_SHORTCUT = 5, IME_FORWARD = 6, IME_MOVE = 7,
-       IME_ROW = 8, IME_SELECT = 9, IME_COPY = 10, IME_CUT = 11, IME_PASTE = 12 };
+       IME_ROW = 8, IME_SELECT = 9, IME_COPY = 10, IME_CUT = 11, IME_PASTE = 12, IME_HEADING = 13,
+       IME_TAB = 14 };
 
 /* A commit longer than this is rejected. */
 enum { IME_TEXT_MAX = 4096 };
@@ -43,6 +44,12 @@ int ime_push_shortcut(int code);
 
 /* Queue select-all, copy, cut, or paste. Returns 0, or -1. */
 int ime_push_clip(int kind);
+
+/* Queue a jump to the next or previous heading. dir is 1 or -1. Returns 0, or -1. */
+int ime_push_heading(int dir);
+
+/* Queue a table-cell step. dir is 1 or -1. Returns 0, or -1. */
+int ime_push_tab(int dir);
 
 /* Take the oldest op. The caller frees bytes. Returns 0, or -1 when empty. */
 int ime_take(struct ImeOp *out);

@@ -417,6 +417,17 @@ static void test_rendered(const unsigned char *font, int font_len) {
         }
     }
     expect(nested_x > flat_x, "a nested list indents its bullet");
+
+    const char *counted = "one two\nthree";
+    page_draw(px, width, height, 0, 0, width, height, counted, strlen(counted), 0, 0, font_px);
+    expect(page_words() == 3 && page_lines() == 2, "three words on two lines");
+    const char *marks = "# Hi\n---\n";
+    page_draw(px, width, height, 0, 0, width, height, marks, strlen(marks), 0, 0, font_px);
+    expect(page_words() == 1, "marks are not words");
+    const char *heads = "a\n# B\nc\n# D\n";
+    expect(page_heading(heads, strlen(heads), 0, 1) == 2, "the next heading is B");
+    expect(page_heading(heads, strlen(heads), 2, 1) == 8, "the heading after B is D");
+    expect(page_heading(heads, strlen(heads), 8, -1) == 2, "the heading before D is B");
     free(px);
 }
 

@@ -102,6 +102,10 @@ public class Pen extends android.app.NativeActivity {
 
     static native void clip(int kind);
 
+    static native void heading(int dir);
+
+    static native void tableTab(int dir);
+
     static native void finishComposing();
 
     static native void undo();
@@ -312,6 +316,16 @@ class ImeView extends android.view.View {
         /* Gboard takes hardware keys once this view is the editor. Claim the editing keys here. */
         if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) {
             return false;
+        }
+        if (keyCode == android.view.KeyEvent.KEYCODE_TAB) {
+            Pen.tableTab(event.isShiftPressed() ? -1 : 1);
+            return true;
+        }
+        if (event.isCtrlPressed() && !event.isShiftPressed()
+                && (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                        || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN)) {
+            Pen.heading(keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ? 1 : -1);
+            return true;
         }
         if (!event.isCtrlPressed() && keyCode == android.view.KeyEvent.KEYCODE_FORWARD_DEL) {
             Pen.eraseForward(1);

@@ -117,6 +117,39 @@ static void test_place(void) {
     doc_free(doc);
 }
 
+static void test_task(void) {
+    Doc *doc = doc_new();
+    const char *text = "- [ ] milk\n- [x] eggs";
+    expect(doc_insert(doc, text, strlen(text)) == 0, "insert tasks");
+    expect(doc_toggle_task(doc, 3) == 0, "toggle the open box");
+    expect(strcmp(doc_text(doc, NULL), "- [x] milk\n- [x] eggs") == 0, "the box is checked");
+    expect(doc_toggle_task(doc, 14) == 0, "toggle the checked box");
+    expect(strcmp(doc_text(doc, NULL), "- [x] milk\n- [ ] eggs") == 0, "the box is cleared");
+    expect(doc_toggle_task(doc, 8) == -1, "the words are not the box");
+    doc_free(doc);
+}
+
+static void test_table_tab(void) {
+    Doc *doc = doc_new();
+    const char *text = "| A | B |\n| --- | --- |\n| c | d |";
+    expect(doc_insert(doc, text, strlen(text)) == 0, "insert a table");
+    doc_place(doc, 2);
+    expect(doc_table_tab(doc, 1) == 0 && doc_caret(doc) == 6, "tab moves from A to B");
+    expect(doc_table_tab(doc, 1) == 0 && doc_caret(doc) == 26, "tab skips the delimiter onto c");
+    expect(doc_table_tab(doc, 1) == 0 && doc_caret(doc) == 30, "tab moves from c to d");
+    size_t before = 0;
+    doc_text(doc, &before);
+    expect(doc_table_tab(doc, 1) == 1, "tab off the last cell adds a row");
+    size_t after = 0;
+    const char *got = doc_text(doc, &after);
+    expect(after > before && got[doc_caret(doc)] != '|', "the new row has a cell for the caret");
+    expect(doc_table_tab(doc, -1) == 0 && doc_caret(doc) == 30, "shift-tab returns to d");
+    doc_place(doc, 0);
+    expect(doc_load_bytes(doc, "hello", 5) == 0, "leave the table");
+    expect(doc_table_tab(doc, 1) == -1, "tab outside a table does nothing");
+    doc_free(doc);
+}
+
 static void test_rows(void) {
     Doc *doc = doc_new();
     expect(doc_insert(doc, "ab\ncd", 5) == 0, "two lines");
@@ -252,6 +285,8 @@ int main(void) {
     test_utf8();
     test_delete_forward();
     test_place();
+    test_task();
+    test_table_tab();
     test_rows();
     test_load_bytes();
     test_selection_and_undo();
