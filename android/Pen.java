@@ -92,10 +92,11 @@ public class Pen extends android.app.NativeActivity {
 
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        if (isDocument(getIntent())) {
+        /* Rewrite a share before NativeActivity starts, so the first read sees the file. */
+        if (!adoptShare(getIntent()) && isDocument(getIntent())) {
             documentIntent = new Intent(getIntent());
         }
+        super.onCreate(savedInstanceState);
         android.view.View content = findViewById(android.R.id.content);
         if (!(content instanceof android.view.ViewGroup)) {
             return;
@@ -112,12 +113,127 @@ public class Pen extends android.app.NativeActivity {
         super.onNewIntent(intent);
         /* A restore often arrives as a bare component intent. Replacing the
            open document with that would drop the file on the next resume. */
+        if (adoptShare(intent)) {
+            return;
+        }
         if (isDocument(intent)) {
             documentIntent = new Intent(intent);
             setIntent(intent);
         } else if (documentIntent != null) {
             setIntent(documentIntent);
         }
+    }
+
+    /** Turn a share-sheet intent into a view of one text file. Returns true when it did. */
+    private boolean adoptShare(Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        String action = intent.getAction();
+        if (!Intent.ACTION_SEND.equals(action) && !Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            return false;
+        }
+        Uri uri = shareStream(intent);
+        if (uri == null) {
+            uri = shareText(intent);
+        }
+        if (uri == null) {
+            return false;
+        }
+        Intent view = new Intent(Intent.ACTION_VIEW);
+        String type = intent.getType();
+        if (type == null || "*/*".equals(type)) {
+            type = "text/plain";
+        }
+        view.setDataAndType(uri, type);
+        int flags = intent.getFlags()
+                & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        view.addFlags(flags);
+        if ("content".equals(uri.getScheme()) && flags != 0) {
+            try {
+                getContentResolver().takePersistableUriPermission(uri, flags);
+            } catch (SecurityException ignored) {
+            }
+        }
+        documentIntent = view;
+        setIntent(view);
+        opened = null;
+        return true;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static Uri shareStream(Intent intent) {
+        Object one = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (one instanceof Uri && openable((Uri) one)) {
+            return (Uri) one;
+        }
+        Object many = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+        if (many instanceof java.util.ArrayList) {
+            for (Object item : (java.util.ArrayList<?>) many) {
+                if (item instanceof Uri && openable((Uri) item)) {
+                    return (Uri) item;
+                }
+            }
+        }
+        android.content.ClipData clip = intent.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri uri = clip.getItemAt(i).getUri();
+                if (openable(uri)) {
+                    return uri;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Uri shareText(Intent intent) {
+        String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (text == null) {
+            android.content.ClipData clip = intent.getClipData();
+            if (clip != null && clip.getItemCount() > 0 && clip.getItemAt(0).getText() != null) {
+                text = clip.getItemAt(0).getText().toString();
+            }
+        }
+        if (text == null) {
+            return null;
+        }
+        java.io.File dir = getFilesDir();
+        java.io.File[] old = dir.listFiles();
+        if (old != null) {
+            for (java.io.File file : old) {
+                String name = file.getName();
+                if (name.startsWith("shared-") && name.endsWith(".md")) {
+                    file.delete();
+                }
+            }
+        }
+        java.io.File outFile = new java.io.File(dir, "shared-" + System.currentTimeMillis() + ".md");
+        java.io.FileOutputStream out = null;
+        try {
+            out = new java.io.FileOutputStream(outFile);
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.close();
+            out = null;
+            return Uri.fromFile(outFile);
+        } catch (java.io.IOException ignored) {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (java.io.IOException ignoredClose) {
+                }
+            }
+            outFile.delete();
+            return null;
+        }
+    }
+
+    private static boolean openable(Uri uri) {
+        if (uri == null) {
+            return false;
+        }
+        String scheme = uri.getScheme();
+        return "content".equals(scheme) || "file".equals(scheme);
     }
 
     private static boolean isDocument(Intent intent) {

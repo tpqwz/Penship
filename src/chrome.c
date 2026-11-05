@@ -19,7 +19,7 @@ int text_step_count(void) {
 }
 
 int text_step_default(void) {
-    return 2;
+    return 4;
 }
 
 int text_px(int density, int step) {

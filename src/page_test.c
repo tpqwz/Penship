@@ -182,6 +182,12 @@ static void test_user_scroll(const unsigned char *font, int font_len) {
     page_draw(px, width, height, 0, 0, width, height, "T", 1, 0, 0, font_px);
     expect(page_caret_near(margin, margin + 4, 64), "the caret sits by the margin");
     expect(!page_caret_near(width - 2, height - 2, 24), "the far corner is not the caret");
+    const char *many = "alpha\nbeta\ngamma\ndelta\n";
+    int before = page_measures();
+    page_draw(px, width, height, 0, 0, width, height, many, strlen(many), 0, 0, font_px);
+    int measured = page_measures() - before;
+    page_draw(px, width, height, 0, 0, width, height, many, strlen(many), 0, 0, font_px);
+    expect(measured > 0 && page_measures() == before + measured, "a redraw reuses the line index");
     expect(page_drag_kind(0, 0, 0, 0) == 0, "a press is still deciding");
     expect(page_drag_kind(1, 0, 0, 0) == 1, "a quick drag scrolls");
     expect(page_drag_kind(1, 0, 1, 0) == 2, "a drag from the caret selects");

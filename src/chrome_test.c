@@ -89,11 +89,11 @@ static void test_wide(void) {
 
 static void test_text_px(void) {
     expect(text_step_count() == 7, "seven sizes");
-    expect(text_step_default() == 2, "the default step is 18sp");
+    expect(text_step_default() == 4, "the default step is 24sp");
     int small = text_px(160, 0);
     int mid = text_px(160, text_step_default());
     int big = text_px(160, text_step_count() - 1);
-    expect(small == 14 && mid == 18 && big == 32, "steps are 14, 18, and 32 pixels at mdpi");
+    expect(small == 14 && mid == 24 && big == 32, "steps are 14, 24, and 32 pixels at mdpi");
     expect(text_px(320, 2) == 36, "18sp doubles at 320 dpi");
     expect(text_px(80, 2) == text_px(160, 2), "a tiny density uses 160");
     expect(text_px(320, -3) == text_px(320, 0), "a step below the first clamps");

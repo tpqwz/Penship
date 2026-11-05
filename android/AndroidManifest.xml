@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="app.penship"
-    android:versionCode="3"
-    android:versionName="0.1.1-alpha">
+    android:versionCode="5"
+    android:versionName="0.1.3-alpha">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
@@ -73,6 +73,18 @@
                 <data android:pathPattern=".*\\..*\\.txt" />
                 <data android:pathPattern=".*\\..*\\..*\\.txt" />
                 <data android:pathPattern=".*\\..*\\..*\\..*\\.txt" />
+            </intent-filter>
+            <!-- Share sheet: a text or markdown file, or shared text. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/x-markdown" />
+                <data android:mimeType="application/markdown" />
+                <data android:mimeType="application/x-markdown" />
             </intent-filter>
             <!-- The same names when the sender sets no mime type. -->
             <intent-filter>

@@ -42,7 +42,7 @@ jobs:
             kind="Release"
           else
             tag="alpha-${GITHUB_SHA}"
-            title="penship 0.1.0-alpha (${short})"
+            title="penship 0.1.3-alpha (${short})"
             prerelease=(--prerelease)
             kind="Pre-release"
           fi

@@ -19,7 +19,19 @@ struct Edit {
     size_t anchor;
 };
 
+/* A leaf holds at most this many bytes. A larger edit splits the leaf. */
+#define ROPE_LEAF 4096
+
+struct Piece {
+    char *data;
+    size_t len;
+    size_t cap;
+};
+
 struct Doc {
+    struct Piece *piece;
+    size_t npiece;
+    size_t piece_cap;
     char *bytes;
     size_t len;
     size_t cap;
@@ -30,15 +42,110 @@ struct Doc {
     size_t undo_bytes;
 };
 
-/* shortcut: memmove on every insert, gap buffer when notes get large. */
+static void piece_clear(Doc *doc) {
+    for (size_t i = 0; i < doc->npiece; i++) {
+        free(doc->piece[i].data);
+    }
+    free(doc->piece);
+    doc->piece = NULL;
+    doc->npiece = 0;
+    doc->piece_cap = 0;
+}
+
+static int piece_slot(Doc *doc, size_t at) {
+    if (doc->npiece > SIZE_MAX - 1) {
+        return -1;
+    }
+    if (doc->npiece + 1 > doc->piece_cap) {
+        size_t cap = doc->piece_cap == 0 ? 4 : doc->piece_cap * 2;
+        struct Piece *grown = realloc(doc->piece, cap * sizeof *grown);
+        if (grown == NULL) {
+            return -1;
+        }
+        doc->piece = grown;
+        doc->piece_cap = cap;
+    }
+    if (at > doc->npiece) {
+        at = doc->npiece;
+    }
+    memmove(doc->piece + at + 1, doc->piece + at, (doc->npiece - at) * sizeof *doc->piece);
+    memset(&doc->piece[at], 0, sizeof doc->piece[at]);
+    doc->npiece++;
+    return 0;
+}
+
+static int piece_alloc(struct Piece *piece, size_t cap) {
+    if (cap < 1) {
+        cap = 1;
+    }
+    char *data = malloc(cap);
+    if (data == NULL) {
+        return -1;
+    }
+    piece->data = data;
+    piece->cap = cap;
+    piece->len = 0;
+    return 0;
+}
+
+/* Find the leaf that contains byte at. at == len lands on the end of the last leaf. */
+static int locate(const Doc *doc, size_t at, size_t *pi, size_t *inner) {
+    if (doc->npiece == 0 || at > doc->len) {
+        return -1;
+    }
+    size_t acc = 0;
+    for (size_t i = 0; i < doc->npiece; i++) {
+        size_t next = acc + doc->piece[i].len;
+        if (at < next || i + 1 == doc->npiece) {
+            *pi = i;
+            *inner = at - acc;
+            return 0;
+        }
+        acc = next;
+    }
+    return -1;
+}
+
+static int flatten(Doc *doc) {
+    if (doc->cap < doc->len + 1) {
+        size_t cap = doc->cap < 64 ? 64 : doc->cap;
+        while (cap < doc->len + 1) {
+            if (cap > SIZE_MAX / 2) {
+                return -1;
+            }
+            cap *= 2;
+        }
+        char *bytes = realloc(doc->bytes, cap);
+        if (bytes == NULL) {
+            return -1;
+        }
+        doc->bytes = bytes;
+        doc->cap = cap;
+    }
+    size_t off = 0;
+    for (size_t i = 0; i < doc->npiece; i++) {
+        if (doc->piece[i].len > 0) {
+            memcpy(doc->bytes + off, doc->piece[i].data, doc->piece[i].len);
+            off += doc->piece[i].len;
+        }
+    }
+    doc->bytes[off] = '\0';
+    return 0;
+}
 
 Doc *doc_new(void) {
     Doc *doc = calloc(1, sizeof *doc);
     if (doc == NULL) {
         return NULL;
     }
+    if (piece_slot(doc, 0) != 0 || piece_alloc(&doc->piece[0], 1) != 0) {
+        piece_clear(doc);
+        free(doc);
+        return NULL;
+    }
     doc->bytes = calloc(1, 1);
     if (doc->bytes == NULL) {
+        piece_clear(doc);
         free(doc);
         return NULL;
     }
@@ -60,6 +167,7 @@ void doc_free(Doc *doc) {
         return;
     }
     undo_clear(doc);
+    piece_clear(doc);
     free(doc->bytes);
     free(doc);
 }
@@ -89,23 +197,26 @@ static void sel_bounds(const Doc *doc, size_t *lo, size_t *hi) {
     }
 }
 
-static int grow(Doc *doc, size_t need) {
-    if (need <= doc->cap) {
+static int piece_room(struct Piece *piece, size_t need) {
+    if (need <= piece->cap) {
         return 0;
     }
-    size_t cap = doc->cap < 64 ? 64 : doc->cap;
+    size_t cap = piece->cap < 64 ? 64 : piece->cap;
     while (cap < need) {
-        if (cap > (SIZE_MAX / 2)) {
+        if (cap > SIZE_MAX / 2) {
             return -1;
         }
         cap *= 2;
     }
-    char *bytes = realloc(doc->bytes, cap);
-    if (bytes == NULL) {
+    if (cap > ROPE_LEAF) {
+        cap = need > ROPE_LEAF ? need : ROPE_LEAF;
+    }
+    char *data = realloc(piece->data, cap);
+    if (data == NULL) {
         return -1;
     }
-    doc->bytes = bytes;
-    doc->cap = cap;
+    piece->data = data;
+    piece->cap = cap;
     return 0;
 }
 
@@ -123,18 +234,116 @@ static void undo_drop_oldest(Doc *doc) {
     doc->undo_n--;
 }
 
+/* Drop cut bytes at at from the leaves. The flat mirror is updated by the caller. */
+static int rope_cut(Doc *doc, size_t at, size_t cut) {
+    while (cut > 0) {
+        size_t pi = 0;
+        size_t inner = 0;
+        if (locate(doc, at, &pi, &inner) != 0) {
+            return -1;
+        }
+        struct Piece *piece = &doc->piece[pi];
+        if (piece->len == 0) {
+            if (doc->npiece == 1) {
+                return cut == 0 ? 0 : -1;
+            }
+            free(piece->data);
+            memmove(doc->piece + pi, doc->piece + pi + 1, (doc->npiece - pi - 1) * sizeof *doc->piece);
+            doc->npiece--;
+            continue;
+        }
+        size_t avail = piece->len - inner;
+        size_t take = cut < avail ? cut : avail;
+        memmove(piece->data + inner, piece->data + inner + take, piece->len - inner - take);
+        piece->len -= take;
+        if (doc->len < take) {
+            return -1;
+        }
+        doc->len -= take;
+        cut -= take;
+        if (piece->len == 0 && doc->npiece > 1) {
+            free(piece->data);
+            memmove(doc->piece + pi, doc->piece + pi + 1, (doc->npiece - pi - 1) * sizeof *doc->piece);
+            doc->npiece--;
+        }
+    }
+    return 0;
+}
+
+/* Insert n bytes at at. n is at most one leaf. */
+static int rope_put(Doc *doc, size_t at, const char *in, size_t n) {
+    if (n == 0) {
+        return 0;
+    }
+    size_t pi = 0;
+    size_t inner = 0;
+    if (locate(doc, at, &pi, &inner) != 0) {
+        return -1;
+    }
+    struct Piece *piece = &doc->piece[pi];
+    if (piece->len + n <= ROPE_LEAF && piece_room(piece, piece->len + n) == 0) {
+        memmove(piece->data + inner + n, piece->data + inner, piece->len - inner);
+        memcpy(piece->data + inner, in, n);
+        piece->len += n;
+        doc->len += n;
+        return 0;
+    }
+    /* Split this leaf and put the new bytes in their own leaf. */
+    size_t right_n = piece->len - inner;
+    char *right = NULL;
+    if (right_n > 0) {
+        right = malloc(right_n);
+        if (right == NULL) {
+            return -1;
+        }
+        memcpy(right, piece->data + inner, right_n);
+    }
+    piece->len = inner;
+    if (piece_slot(doc, pi + 1) != 0) {
+        free(right);
+        return -1;
+    }
+    if (piece_alloc(&doc->piece[pi + 1], n) != 0) {
+        free(right);
+        return -1;
+    }
+    memcpy(doc->piece[pi + 1].data, in, n);
+    doc->piece[pi + 1].len = n;
+    doc->len += n;
+    if (right_n > 0) {
+        if (piece_slot(doc, pi + 2) != 0 || piece_alloc(&doc->piece[pi + 2], right_n) != 0) {
+            free(right);
+            return -1;
+        }
+        memcpy(doc->piece[pi + 2].data, right, right_n);
+        doc->piece[pi + 2].len = right_n;
+        free(right);
+    }
+    return 0;
+}
+
 static int splice(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
     if (at > doc->len || cut > doc->len - at || n > SIZE_MAX - (doc->len - cut) - 1) {
         return -1;
     }
-    if (grow(doc, doc->len - cut + n + 1) != 0) {
+    size_t new_len = doc->len - cut + n;
+    if (rope_cut(doc, at, cut) != 0) {
         return -1;
     }
-    memmove(doc->bytes + at + n, doc->bytes + at + cut, doc->len - at - cut + 1);
-    if (n > 0) {
-        memcpy(doc->bytes + at, in, n);
+    size_t left = n;
+    size_t off = 0;
+    while (left > 0) {
+        size_t chunk = left > ROPE_LEAF ? ROPE_LEAF : left;
+        if (rope_put(doc, at + off, in + off, chunk) != 0) {
+            return -1;
+        }
+        off += chunk;
+        left -= chunk;
     }
-    doc->len = doc->len - cut + n;
+    doc->len = new_len;
+    if (flatten(doc) != 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -849,7 +1058,53 @@ int doc_load_bytes(Doc *doc, const char *bytes, size_t n) {
     if (n > 0) {
         memcpy(copy, bytes, n);
     }
+    struct Piece *piece = NULL;
+    size_t npiece = 0;
+    size_t cap = 0;
+    size_t off = 0;
+    int built = 0;
+    do {
+        size_t chunk = n - off;
+        if (chunk > ROPE_LEAF) {
+            chunk = ROPE_LEAF;
+        }
+        if (npiece == cap) {
+            size_t next_cap = cap == 0 ? 4 : cap * 2;
+            struct Piece *grown = realloc(piece, next_cap * sizeof *grown);
+            if (grown == NULL) {
+                built = -1;
+                break;
+            }
+            piece = grown;
+            cap = next_cap;
+        }
+        char *data = malloc(chunk > 0 ? chunk : 1);
+        if (data == NULL) {
+            built = -1;
+            break;
+        }
+        if (chunk > 0) {
+            memcpy(data, bytes + off, chunk);
+        }
+        piece[npiece].data = data;
+        piece[npiece].len = chunk;
+        piece[npiece].cap = chunk > 0 ? chunk : 1;
+        npiece++;
+        off += chunk;
+    } while (off < n);
+    if (built != 0 || npiece == 0) {
+        for (size_t i = 0; i < npiece; i++) {
+            free(piece[i].data);
+        }
+        free(piece);
+        free(copy);
+        return -1;
+    }
+    piece_clear(doc);
     free(doc->bytes);
+    doc->piece = piece;
+    doc->npiece = npiece;
+    doc->piece_cap = cap;
     doc->bytes = copy;
     doc->len = n;
     doc->cap = n + 1;

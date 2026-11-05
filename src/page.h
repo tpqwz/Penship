@@ -85,6 +85,9 @@ int page_margin(int font_px);
 void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box_w, int box_h,
                const char *text, size_t text_len, size_t caret, size_t anchor, int font_px);
 
+/* How many times a line was measured. A redraw of an unchanged note does not add more. */
+int page_measures(void);
+
 /* Byte offset under a point in the same buffer space as page_draw. */
 size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, size_t text_len, size_t caret,
                 int font_px, int x, int y);

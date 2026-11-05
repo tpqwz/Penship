@@ -891,11 +891,20 @@ static int screen_row(uint64_t row_y, uint64_t scroll, int origin_y) {
 
 /* Lay out one newline-row. Heights accumulate in the caller as uint64 so a tall note
    cannot wrap a signed pixel coordinate. Returns the visual row count, at least 1. */
+static int g_measures;
+
+int page_measures(void) {
+    return g_measures;
+}
+
 static uint32_t layout_line(uint8_t *px, int width, int height, const char *text, size_t off, size_t len,
                             size_t caret, int origin_x, int max_x, int origin_y, int line_h, int baseline,
                             int space_px, float scale, int draw, uint64_t row0, uint64_t scroll, int view_h,
                             size_t sel_lo, size_t sel_hi, int source, const uint8_t *mark, int uniform,
                             int *caret_x, int *caret_row) {
+    if (!draw) {
+        g_measures++;
+    }
     int x = origin_x;
     int prev = 0;
     uint32_t row = 0;
@@ -1164,9 +1173,84 @@ static int line_kind(const char *text, size_t off, size_t content, int *fence) {
     return KIND_BODY;
 }
 
-/* shortcut: the line index is rebuilt on every draw. Patch it on edit when a profile says so. */
+static struct Index g_keep;
+static uint64_t g_keep_hash;
+static size_t g_keep_len;
+static size_t g_keep_caret;
+static int g_keep_ox;
+static int g_keep_mx;
+static int g_keep_lh;
+static int g_keep_sp;
+static int g_keep_editing;
+static int g_keep_source;
+static float g_keep_scale;
+static int g_keep_x;
+static uint64_t g_keep_y;
+static int g_keep_ok;
+
+static uint64_t text_hash(const char *text, size_t n) {
+    uint64_t hash = 14695981039346656037ull;
+    for (size_t i = 0; i < n; i++) {
+        hash ^= (unsigned char)text[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static int keep_copy(struct Index *idx) {
+    struct Line *lines = malloc(g_keep.n * sizeof *lines);
+    if (lines == NULL && g_keep.n > 0) {
+        return -1;
+    }
+    if (g_keep.n > 0) {
+        memcpy(lines, g_keep.lines, g_keep.n * sizeof *lines);
+    }
+    idx->lines = lines;
+    idx->n = g_keep.n;
+    idx->cap = g_keep.n;
+    idx->caret_x = g_keep_x;
+    idx->caret_y = g_keep_y;
+    return 0;
+}
+
+static void keep_store(const struct Index *idx, const char *text, size_t text_len, size_t caret, int origin_x, int max_x,
+                       int line_h, int space_px, float scale) {
+    struct Line *lines = malloc(idx->n * sizeof *lines);
+    if (lines == NULL && idx->n > 0) {
+        g_keep_ok = 0;
+        return;
+    }
+    if (idx->n > 0) {
+        memcpy(lines, idx->lines, idx->n * sizeof *lines);
+    }
+    free(g_keep.lines);
+    g_keep.lines = lines;
+    g_keep.n = idx->n;
+    g_keep.cap = idx->n;
+    g_keep_hash = text_hash(text, text_len);
+    g_keep_len = text_len;
+    g_keep_caret = caret;
+    g_keep_ox = origin_x;
+    g_keep_mx = max_x;
+    g_keep_lh = line_h;
+    g_keep_sp = space_px;
+    g_keep_scale = scale;
+    g_keep_editing = g_editing;
+    g_keep_source = g_source;
+    g_keep_x = idx->caret_x;
+    g_keep_y = idx->caret_y;
+    g_keep_ok = 1;
+}
+
+/* The line index is reused while the note, the width, and the caret stay put. */
 static int build_index(struct Index *idx, const char *text, size_t text_len, size_t caret, int origin_x, int max_x,
                        int line_h, int space_px, float scale) {
+    if (g_keep_ok && g_keep.n > 0 && text != NULL && g_keep_len == text_len && g_keep_caret == caret &&
+        g_keep_ox == origin_x && g_keep_mx == max_x && g_keep_lh == line_h && g_keep_sp == space_px &&
+        g_keep_scale == scale && g_keep_editing == g_editing && g_keep_source == g_source &&
+        text_hash(text, text_len) == g_keep_hash) {
+        return keep_copy(idx);
+    }
     idx->caret_x = origin_x;
     idx->caret_y = 0;
     g_words = 0;
@@ -1267,6 +1351,7 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
     }
     mark_tables(text, idx);
+    keep_store(idx, text, text_len, caret, origin_x, max_x, line_h, space_px, scale);
     return 0;
 }
 

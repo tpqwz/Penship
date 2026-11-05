@@ -104,6 +104,7 @@ apk: test $(foreach abi,$(ABIS),build/lib/$(abi)/libpenship.so) build/dex/classe
 		assets/LiberationSerif-Regular.ttf=assets/LiberationSerif-Regular.ttf \
 		assets/LiberationMono-Regular.ttf=assets/LiberationMono-Regular.ttf \
 		assets/OFL.txt=assets/OFL.txt \
+		assets/showcase.md=samples/showcase.md \
 		classes.dex=build/dex/classes.dex
 	$(ZIPALIGN) -P 16 -f 4 build/unaligned.apk build/aligned.apk
 	@test -f build/debug.keystore || keytool -genkeypair -keystore build/debug.keystore \

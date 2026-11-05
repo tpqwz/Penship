@@ -338,6 +338,31 @@ static void test_save_load(void) {
     remove("build/bad-note.md");
 }
 
+static void test_rope(void) {
+    Doc *doc = doc_new();
+    char *block = malloc(5000);
+    expect(doc != NULL && block != NULL, "rope alloc");
+    if (doc == NULL || block == NULL) {
+        free(block);
+        doc_free(doc);
+        return;
+    }
+    memset(block, 'a', 5000);
+    expect(doc_insert(doc, block, 5000) == 0, "a long run is stored");
+    doc_place(doc, 100);
+    expect(doc_insert(doc, "XYZ", 3) == 0, "insert inside the rope");
+    size_t len = 0;
+    const char *s = doc_text(doc, &len);
+    expect(len == 5003 && s[100] == 'X' && s[101] == 'Y' && s[102] == 'Z' && s[103] == 'a', "the rope keeps the bytes");
+    doc_place(doc, 4090);
+    doc_seek(doc, 4110);
+    expect(doc_insert(doc, "Q", 1) == 0, "replace across a leaf boundary");
+    s = doc_text(doc, &len);
+    expect(len == 5003 - 20 + 1 && s[4090] == 'Q', "a boundary edit stays in order");
+    doc_free(doc);
+    free(block);
+}
+
 int main(void) {
     test_insert_and_move();
     test_utf8();
@@ -350,6 +375,7 @@ int main(void) {
     test_load_bytes();
     test_selection_and_undo();
     test_save_load();
+    test_rope();
     if (fail) {
         return 1;
     }

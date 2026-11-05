@@ -57,6 +57,7 @@ struct App {
     char path[1024];
     char copy_path[1024];
     char last_path[1024];
+    char prefs_path[1024];
     char open_id[2048];
     int session;
     unsigned char *fonts[3];
@@ -307,6 +308,8 @@ static void render(struct App *app) {
 
 static int write_uri(struct App *app);
 static void pick_file(struct App *app, int create);
+static void save_prefs(struct App *app);
+static unsigned char *load_asset(AAssetManager *manager, const char *name, int *len);
 
 static volatile int g_reload;
 
@@ -328,6 +331,102 @@ static void save_doc(struct App *app) {
     if (app->session == SESSION_NOTE && app->path[0] != '\0' && doc_save(app->doc, app->path) != 0) {
         LOGE("save failed");
     }
+}
+
+static void save_prefs(struct App *app) {
+    if (app->prefs_path[0] == '\0') {
+        return;
+    }
+    int step = app->step;
+    int last = text_step_count() - 1;
+    if (step < 0) {
+        step = 0;
+    }
+    if (step > last) {
+        step = last;
+    }
+    int face = app->face;
+    if (face < 0) {
+        face = 0;
+    }
+    if (face > 2) {
+        face = 2;
+    }
+    FILE *f = fopen(app->prefs_path, "w");
+    if (f == NULL) {
+        return;
+    }
+    if (fprintf(f, "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\ntheme=%d\nsource=%d\n", step, face, page_typewriter(),
+                page_focus(), page_theme(), page_source()) < 0) {
+        fclose(f);
+        return;
+    }
+    fclose(f);
+}
+
+static void load_prefs(struct App *app) {
+    app->step = text_step_default();
+    app->face = 0;
+    if (app->prefs_path[0] == '\0') {
+        return;
+    }
+    FILE *f = fopen(app->prefs_path, "r");
+    if (f == NULL) {
+        return;
+    }
+    char line[64];
+    while (fgets(line, (int)sizeof line, f) != NULL) {
+        int value = 0;
+        if (sscanf(line, "step=%d", &value) == 1) {
+            app->step = value;
+        } else if (sscanf(line, "face=%d", &value) == 1) {
+            app->face = value;
+        } else if (sscanf(line, "typewriter=%d", &value) == 1) {
+            page_set_typewriter(value);
+        } else if (sscanf(line, "focus=%d", &value) == 1) {
+            page_set_focus(value);
+        } else if (sscanf(line, "theme=%d", &value) == 1) {
+            page_set_theme(value);
+        } else if (sscanf(line, "source=%d", &value) == 1) {
+            page_set_source(value);
+        }
+    }
+    fclose(f);
+    int last = text_step_count() - 1;
+    if (app->step < 0) {
+        app->step = 0;
+    }
+    if (app->step > last) {
+        app->step = last;
+    }
+    if (app->face < 0) {
+        app->face = 0;
+    }
+    if (app->face > 2) {
+        app->face = 2;
+    }
+}
+
+static int seed_sample(struct App *app) {
+    if (app->android == NULL || app->android->activity == NULL || app->android->activity->assetManager == NULL) {
+        return -1;
+    }
+    int n = 0;
+    unsigned char *bytes = load_asset(app->android->activity->assetManager, "showcase.md", &n);
+    if (bytes == NULL || n <= 0) {
+        free(bytes);
+        return -1;
+    }
+    int rc = doc_load_bytes(app->doc, (const char *)bytes, (size_t)n);
+    free(bytes);
+    if (rc != 0) {
+        return -1;
+    }
+    if (app->path[0] != '\0' && doc_save(app->doc, app->path) != 0) {
+        LOGE("sample save failed");
+    }
+    LOGI("seeded sample %d", n);
+    return 0;
 }
 
 static JNIEnv *jni_env(struct App *app) {
@@ -657,12 +756,15 @@ static int refresh_session(struct App *app) {
         return 1;
     }
     app->open_id[0] = '\0';
-    if (app->path[0] == '\0' || doc_load(app->doc, app->path) != 0) {
-        doc_load_bytes(app->doc, "", 0);
-    } else {
-        size_t len = 0;
+    int loaded = app->path[0] != '\0' && doc_load(app->doc, app->path) == 0;
+    size_t len = 0;
+    if (loaded) {
         doc_text(app->doc, &len);
-        LOGI("loaded %zu bytes", len);
+    }
+    if (!loaded || len == 0) {
+        if (seed_sample(app) != 0) {
+            doc_load_bytes(app->doc, "", 0);
+        }
     }
     app->session = SESSION_NOTE;
     return 1;
@@ -1158,9 +1260,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             } else if (hit == CHROME_SAVE) {
                 save_doc(app);
                 app->settings = 0;
-                if (app->session != SESSION_URI) {
-                    pick_file(app, 1);
-                }
+                pick_file(app, 1);
             } else if (hit == CHROME_DONE) {
                 app->settings = 0;
             } else if (app->settings && hit < 0) {
@@ -1222,6 +1322,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 show_keyboard(app);
                 return 1;
             }
+            save_prefs(app);
             render(app);
             return 1;
         }
@@ -1253,6 +1354,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         } else {
             page_set_theme(page_theme() == 0 ? 1 : 0);
         }
+        save_prefs(app);
         render(app);
         return 1;
     }
@@ -1410,6 +1512,7 @@ static void on_cmd(struct android_app *android, int32_t cmd) {
         break;
     case APP_CMD_PAUSE:
         save_doc(app);
+        save_prefs(app);
         break;
     case APP_CMD_RESUME:
         refresh_session(app);
@@ -1476,15 +1579,26 @@ void android_main(struct android_app *android) {
         if (wrote < 0 || (size_t)wrote >= sizeof app.last_path) {
             app.last_path[0] = '\0';
         }
+        wrote = snprintf(app.prefs_path, sizeof app.prefs_path, "%s/prefs", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.prefs_path) {
+            app.prefs_path[0] = '\0';
+        }
     }
+    load_prefs(&app);
     refresh_session(&app);
     static const char *k_faces[] = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
                                     "LiberationMono-Regular.ttf"};
     for (int i = 0; i < 3; i++) {
         app.fonts[i] = load_asset(android->activity->assetManager, k_faces[i], &app.font_lens[i]);
     }
-    if (app.fonts[0] == NULL || page_set_font(app.fonts[0], app.font_lens[0]) != 0) {
-        LOGE("font failed");
+    if (app.face < 0 || app.face > 2) {
+        app.face = 0;
+    }
+    if (app.fonts[app.face] == NULL || page_set_font(app.fonts[app.face], app.font_lens[app.face]) != 0) {
+        app.face = 0;
+        if (app.fonts[0] == NULL || page_set_font(app.fonts[0], app.font_lens[0]) != 0) {
+            LOGE("font failed");
+        }
     }
     android->userData = &app;
     android->onAppCmd = on_cmd;
