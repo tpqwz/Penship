@@ -28,11 +28,74 @@ public class Pen extends android.app.NativeActivity {
     /** Document from the last successful read. Saves keep using it if a new intent arrives first. */
     private static Uri opened;
 
+    /** The view or edit intent. A launcher intent must not replace it. */
+    private static Intent documentIntent;
+
+    private static final int REQ_OPEN = 1;
+    private static final int REQ_SAVE = 2;
+
+    private static native void reload(int adopt);
+
+    /** Open is 0. Save-as is 1. The system picker returns in onActivityResult. */
+    public static void pick(Activity activity, int create) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Intent intent = new Intent(create == 0 ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType(create == 0 ? "*/*" : "text/markdown");
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                if (create == 0) {
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"text/plain", "text/markdown", "text/*"});
+                } else {
+                    intent.putExtra(Intent.EXTRA_TITLE, "note.md");
+                }
+                activity.startActivityForResult(intent, create == 0 ? REQ_OPEN : REQ_SAVE);
+            }
+        });
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if ((request != REQ_OPEN && request != REQ_SAVE) || result != RESULT_OK || data == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        if (uri == null) {
+            return;
+        }
+        int flags = data.getFlags()
+                & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (flags != 0) {
+            try {
+                getContentResolver().takePersistableUriPermission(uri, flags);
+            } catch (SecurityException ignored) {
+            }
+        }
+        Intent view = new Intent(Intent.ACTION_VIEW);
+        view.setDataAndType(uri, "text/markdown");
+        view.addFlags(flags);
+        documentIntent = view;
+        setIntent(view);
+        if (request == REQ_SAVE) {
+            opened = uri;
+            reload(1);
+        } else {
+            opened = null;
+            reload(0);
+        }
+    }
+
     static final String IME_TAG = "penship-ime";
 
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (isDocument(getIntent())) {
+            documentIntent = new Intent(getIntent());
+        }
         android.view.View content = findViewById(android.R.id.content);
         if (!(content instanceof android.view.ViewGroup)) {
             return;
@@ -47,9 +110,33 @@ public class Pen extends android.app.NativeActivity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        if (intent != null) {
+        /* A restore often arrives as a bare component intent. Replacing the
+           open document with that would drop the file on the next resume. */
+        if (isDocument(intent)) {
+            documentIntent = new Intent(intent);
             setIntent(intent);
+        } else if (documentIntent != null) {
+            setIntent(documentIntent);
         }
+    }
+
+    private static boolean isDocument(Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        String action = intent.getAction();
+        if (!Intent.ACTION_VIEW.equals(action) && !Intent.ACTION_EDIT.equals(action)) {
+            return false;
+        }
+        Uri uri = intent.getData();
+        if (uri == null && intent.getClipData() != null && intent.getClipData().getItemCount() > 0) {
+            uri = intent.getClipData().getItemAt(0).getUri();
+        }
+        if (uri == null) {
+            return false;
+        }
+        String scheme = uri.getScheme();
+        return "content".equals(scheme) || "file".equals(scheme);
     }
 
     /** The focusable editor, or null when the content view is not up yet. */

@@ -54,6 +54,12 @@ void page_set_theme(int theme);
 void page_set_typewriter(int on);
 void page_set_focus(int on);
 void page_set_source(int on);
+/* Edit mode is opened by a double tap. The caret alone does not open it.
+   While it is on, the caret's line, or its whole fence or table, stays source. */
+void page_set_editing(int on);
+int page_editing(void);
+/* True when both offsets sit in the same line, fence, or table. */
+int page_same_unit(const char *text, size_t text_len, size_t a, size_t b);
 int page_theme(void);
 int page_typewriter(void);
 int page_focus(void);
@@ -94,6 +100,10 @@ int page_center_drag(int dy);
 /* True when the point is close to the caret drawn by the last page_draw. */
 int page_caret_near(int x, int y, int slop);
 
+/* 0 while a press is still deciding. 1 scrolls. 2 selects.
+   held is a press that stayed inside the slop long enough to select. */
+int page_drag_kind(int past_slop, int held, int near_caret, int typewriter);
+
 /* -1 when y is in the top zone, 1 in the bottom zone, otherwise 0. */
 int page_edge(int y, int top, int bottom, int zone);
 
@@ -102,7 +112,7 @@ int page_edge(int y, int top, int bottom, int zone);
 void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, const int *ys, const int *ws,
                       const int *hs, const char *const *labels, int vertical, int font_px);
 
-/* A gear button: a paper disc, an ink ring, and eight teeth. side is the cell. */
-void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side);
+/* A menu mark: a paper disc and three bars. side is the cell. */
+void page_draw_menu(uint8_t *px, int width, int height, int x, int y, int side);
 
 #endif

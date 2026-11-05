@@ -42,12 +42,14 @@ static void test_phone(void) {
     expect(chrome.w[CHROME_SMALLER] == 0 && chrome.w[CHROME_FONT] == 0, "options wait in the settings view");
     int thumb = thumb_of(density);
     expect(chrome.w[CHROME_SETTINGS] <= thumb * 2 && chrome.h[CHROME_SETTINGS] <= thumb * 2,
-           "settings is a small floating button");
-    expect(chrome.x[CHROME_SETTINGS] + chrome.w[CHROME_SETTINGS] > width - thumb, "the gear sits at the end");
-    expect(chrome.y[CHROME_SETTINGS] <= 80 + thumb, "the gear sits under the status inset");
-    expect(chrome.y[CHROME_SETTINGS] + chrome.h[CHROME_SETTINGS] <= height - 160, "the gear sits above the bottom inset");
+           "the menu is a small floating button");
+    expect(chrome.x[CHROME_SETTINGS] + chrome.w[CHROME_SETTINGS] > width - thumb, "the menu sits at the end");
+    expect(chrome.y[CHROME_SETTINGS] <= 80 + thumb, "the menu sits under the status inset");
+    expect(chrome.y[CHROME_SETTINGS] + chrome.h[CHROME_SETTINGS] <= height - 160, "the menu sits above the bottom inset");
     expect(chrome_hit(&chrome, 40, chrome.text_y + 40) == -1, "the page is not a control");
-    expect(chrome_label(CHROME_SETTINGS)[0] == 'S', "settings label");
+    expect(chrome_label(CHROME_SETTINGS)[0] == 'M', "menu label");
+    expect(chrome_label(CHROME_OPEN)[0] == 'O', "open label");
+    expect(chrome_label(CHROME_SAVE)[0] == 'S', "save label");
 }
 
 static void test_settings_view(void) {
@@ -57,13 +59,14 @@ static void test_settings_view(void) {
     const int density = 420;
     chrome_place(&chrome, width, height, 80, 160, density, 1);
     expect(chrome.w[CHROME_SETTINGS] == 0, "the writing control is hidden in the settings view");
-    int options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT, CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_THEME,
-                     CHROME_SOURCE, CHROME_DONE};
-    for (int i = 0; i < 8; i++) {
+    int options[] = {CHROME_OPEN,  CHROME_SAVE,     CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,
+                     CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_THEME,  CHROME_SOURCE, CHROME_DONE};
+    for (int i = 0; i < 10; i++) {
         expect_placed(&chrome, options[i], width, height);
         expect(chrome.y[options[i]] >= 80, "an option sits below the status inset");
         expect(chrome.y[options[i]] + chrome.h[options[i]] <= height - 160, "an option sits above the bottom inset");
     }
+    expect(chrome.y[CHROME_SAVE] > chrome.y[CHROME_OPEN], "save sits under open");
     expect(chrome.y[CHROME_DONE] > chrome.y[CHROME_SOURCE], "done sits after the options");
     expect(chrome_label(CHROME_FONT)[0] == 'F', "font label");
     expect(chrome_label(CHROME_DONE)[0] == 'D', "done label");
@@ -78,8 +81,8 @@ static void test_wide(void) {
     expect(chrome.text_x == 0 && chrome.text_w == width, "a wide page uses the full width");
     expect(chrome.text_h == height - 40 - 40, "a wide page uses the space above the insets");
     expect_placed(&chrome, CHROME_SETTINGS, width, height);
-    expect(chrome.w[CHROME_SETTINGS] < width / 4, "the gear does not become a bar");
-    expect(chrome.y[CHROME_SETTINGS] <= 40 + thumb_of(density), "the wide gear sits under the status inset");
+    expect(chrome.w[CHROME_SETTINGS] < width / 4, "the menu does not become a bar");
+    expect(chrome.y[CHROME_SETTINGS] <= 40 + thumb_of(density), "the wide menu sits under the status inset");
     expect(chrome.w[CHROME_THEME] == 0, "wide writing hides the options");
     expect(chrome.text_y == 40, "the page starts under the top inset");
 }

@@ -5,7 +5,7 @@ A native note on a phone, painted from the markdown you type. This file is the l
 Penship
 ========
 
-The caret line stays source, so the marks you are editing remain visible. Every other line is rendered. A heading of one hash is taller than a heading of two. Settings opens Source, and with Source on the whole note shows its marks. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it.
+A double tap opens that line, or the whole fence or table, so the marks stay visible while you edit it. A single tap only moves the caret, and the line stays rendered. Every other line is rendered. A heading of one hash is taller than a heading of two. Settings opens Source, and with Source on the whole note shows its marks. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it.
 
 ## How to read this note
 
@@ -98,7 +98,7 @@ Qty-style numbers sit on the right. A centered column uses colons on both sides 
 
 ```
 page_draw paints the lines that intersect the view.
-The caret line of a fence stays source with the rest of the fence.
+A double tap inside a fence opens the whole fence. A single tap leaves it rendered.
 A fence is one unit, not a line at a time.
 ```
 
@@ -118,7 +118,7 @@ A fence is one unit. A table is one unit. Put the caret in either and every line
 
 ## Settings
 
-A gear floats at the end of the page, under the status inset, so the keyboard does not cover it. It opens Settings. The options are not rows of buttons on the page.
+A menu mark floats at the end of the page, under the status inset, so the keyboard does not cover it. It opens Open, Save, and the rest of the options. They are not rows of buttons on the page.
 
 Settings opens this list:
 
@@ -154,7 +154,7 @@ Five. Copy and paste go through the Android clipboard. A clip longer than a mebi
 
 Six. Settings opens Smaller, Larger, Font, Typewriter, Focus, Theme, and Source. Done returns to the page.
 
-Seven. That gear opens Settings on a phone and on a wide window. The options are the same list either way.
+Seven. That menu opens Open, Save, and the same options on a phone and on a wide window.
 
 Eight. Open with offers penship for text and for the markdown names it knows. A read-only open falls back to a private copy.
 
@@ -174,7 +174,7 @@ Fifteen. Inline code hides its ticks off the caret line and keeps the code color
 
 Sixteen. The sample is this one file. A short sketch opened for a screenshot is not the sample. When the note looks small, open showcase.md again.
 
-Seventeen. The caret follows a tap. A drag that starts away from the caret moves the page. A drag that starts on the caret grows the selection.
+Seventeen. A tap places the caret and leaves the page where it is. Press and drag to move the page. Press and hold, then drag, to select from that spot. A drag that starts on the caret selects too.
 
 Eighteen. Undo keeps thirty-two edits, and the stored deletions are capped. Ctrl+Z walks that stack back. Loading a file clears it.
 

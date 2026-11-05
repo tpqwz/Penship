@@ -19,6 +19,8 @@ static int g_font_ok;
 static int g_typewriter;
 static int g_focus;
 static int g_source;
+static int g_editing;
+static int g_edit_unit;
 static int g_theme;
 static int g_dim;
 static int g_seek;
@@ -128,6 +130,15 @@ void page_set_focus(int on) {
 
 void page_set_source(int on) {
     g_source = on ? 1 : 0;
+}
+
+void page_set_editing(int on) {
+    g_editing = on ? 1 : 0;
+    g_edit_unit = -1;
+}
+
+int page_editing(void) {
+    return g_editing;
 }
 
 int page_typewriter(void) {
@@ -439,7 +450,7 @@ static void head_face(const char *text, size_t off, size_t content, size_t caret
     *use_h = line_h < 1 ? 1 : line_h;
     *use_scale = scale;
     *slots = 1;
-    if (g_source || (caret >= off && caret <= off + content)) {
+    if (g_source || (g_editing && caret >= off && caret <= off + content)) {
         return;
     }
     if (atx_level(text + off, content) != 1) {
@@ -1362,6 +1373,19 @@ int page_edge(int y, int top, int bottom, int zone) {
     return 0;
 }
 
+int page_drag_kind(int past_slop, int held, int near_caret, int typewriter) {
+    if (held) {
+        return 2;
+    }
+    if (!past_slop) {
+        return 0;
+    }
+    if (typewriter || !near_caret) {
+        return 1;
+    }
+    return 2;
+}
+
 int page_caret_near(int x, int y, int slop) {
     if (g_bar_h <= 0) {
         return 0;
@@ -1540,6 +1564,58 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
     }
 }
 
+static int contiguous_kind(const struct Index *idx, size_t a, size_t b, int kind);
+
+static size_t unit_of(const struct Index *idx, size_t li) {
+    int kind = idx->lines[li].kind;
+    if (kind == KIND_CODE || kind == KIND_TABLE) {
+        while (li > 0 && idx->lines[li - 1].kind == kind) {
+            li--;
+        }
+    }
+    return li;
+}
+
+static int find_line(const struct Index *idx, size_t byte, size_t *li) {
+    for (size_t i = 0; i < idx->n; i++) {
+        size_t end = idx->lines[i].off + idx->lines[i].content;
+        if (byte >= idx->lines[i].off && byte <= end) {
+            *li = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Drop edit mode when the caret has left the segment a double tap opened. */
+static void note_edit_unit(const struct Index *idx, size_t caret_li) {
+    if (!g_editing || idx->n == 0) {
+        return;
+    }
+    size_t unit = unit_of(idx, caret_li);
+    if (g_edit_unit < 0) {
+        g_edit_unit = unit > (size_t)INT_MAX ? INT_MAX : (int)unit;
+        return;
+    }
+    if ((size_t)g_edit_unit != unit) {
+        g_editing = 0;
+        g_edit_unit = -1;
+    }
+}
+
+static int line_is_source(const struct Index *idx, size_t li, size_t caret_li) {
+    if (g_source) {
+        return 1;
+    }
+    if (!g_editing) {
+        return 0;
+    }
+    if (li == caret_li) {
+        return 1;
+    }
+    return contiguous_kind(idx, li, caret_li, KIND_CODE) || contiguous_kind(idx, li, caret_li, KIND_TABLE);
+}
+
 static int contiguous_kind(const struct Index *idx, size_t a, size_t b, int kind) {
     if (idx->lines[a].kind != kind || idx->lines[b].kind != kind) {
         return 0;
@@ -1647,6 +1723,9 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
             caret_li = i;
         }
     }
+    if (text_len > 0) {
+        note_edit_unit(&idx, caret_li);
+    }
     uint64_t y = 0;
     for (size_t li = 0; li < idx.n; li++) {
         struct Line line = idx.lines[li];
@@ -1661,12 +1740,8 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         if ((uint64_t)line_h <= UINT64_MAX - window) {
             window += (uint64_t)line_h;
         }
-        int source = g_source || li == caret_li;
-        if (!g_source && !source &&
-            (contiguous_kind(&idx, li, caret_li, KIND_CODE) || contiguous_kind(&idx, li, caret_li, KIND_TABLE))) {
-            source = 1;
-        }
-        g_dim = g_focus && !source;
+        int source = line_is_source(&idx, li, caret_li);
+        g_dim = g_focus && !source && li != caret_li;
         if (line.kind == KIND_CODE && next > scroll && y < window) {
             for (uint32_t row = 0; row < line.rows; row++) {
                 uint64_t row_y = 0;
@@ -1828,11 +1903,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
         }
     }
     struct Line line = idx.lines[li];
-    int source = g_source || li == caret_li;
-    if (!g_source && !source &&
-        (contiguous_kind(&idx, li, caret_li, KIND_CODE) || contiguous_kind(&idx, li, caret_li, KIND_TABLE))) {
-        source = 1;
-    }
+    int source = line_is_source(&idx, li, caret_li);
     uint64_t into = doc_y >= line_y ? doc_y - line_y : 0;
     int use_h = line_h;
     float use_scale = scale;
@@ -1940,23 +2011,7 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
     }
 }
 
-/* Eight teeth: near an axis or a diagonal, with a gap between them. */
-static int gear_tooth(int dx, int dy) {
-    int64_t ax = dx < 0 ? -(int64_t)dx : (int64_t)dx;
-    int64_t ay = dy < 0 ? -(int64_t)dy : (int64_t)dy;
-    int64_t major = ax > ay ? ax : ay;
-    int64_t minor = ax > ay ? ay : ax;
-    if (major <= 0) {
-        return 1;
-    }
-    if (minor * 4 <= major) {
-        return 1;
-    }
-    int64_t diff = ax > ay ? ax - ay : ay - ax;
-    return diff * 4 <= major;
-}
-
-void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side) {
+void page_draw_menu(uint8_t *px, int width, int height, int x, int y, int side) {
     if (px == NULL || width < 1 || height < 1 || side < 1) {
         return;
     }
@@ -1978,33 +2033,10 @@ void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side) 
     if (plate < 1) {
         plate = 1;
     }
-    int hole = side / 8;
-    int root = side / 4;
-    int tip = side * 13 / 32;
-    int ring = plate - side / 16;
-    if (hole < 1) {
-        hole = 1;
-    }
-    if (root <= hole) {
-        root = hole + 1;
-    }
-    if (tip <= root) {
-        tip = root + 1;
-    }
-    if (ring < 1) {
-        ring = 1;
-    }
-    if (ring > plate) {
-        ring = plate;
-    }
     int pr, pg, pb, ir, ig, ib;
     slot_rgb(SLOT_PAPER, &pr, &pg, &pb);
     slot_rgb(SLOT_INK, &ir, &ig, &ib);
     int64_t plate2 = (int64_t)plate * (int64_t)plate;
-    int64_t hole2 = (int64_t)hole * (int64_t)hole;
-    int64_t root2 = (int64_t)root * (int64_t)root;
-    int64_t tip2 = (int64_t)tip * (int64_t)tip;
-    int64_t ring2 = (int64_t)ring * (int64_t)ring;
     for (int row = 0; row < side; row++) {
         if (y > 0 && row > INT_MAX - y) {
             break;
@@ -2023,34 +2055,75 @@ void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side) 
             }
             int64_t dx64 = (int64_t)xx - (int64_t)cx;
             int64_t dy64 = (int64_t)yy - (int64_t)cy;
-            if (dx64 > INT_MAX || dx64 < INT_MIN || dy64 > INT_MAX || dy64 < INT_MIN) {
-                continue;
-            }
-            int dx = (int)dx64;
-            int dy = (int)dy64;
             int64_t d2 = dx64 * dx64 + dy64 * dy64;
             if (d2 > plate2) {
                 continue;
             }
-            int ink = 0;
-            if (d2 >= ring2) {
-                ink = 1;
-            } else if (d2 > hole2 && d2 <= root2) {
-                ink = 1;
-            } else if (d2 > root2 && d2 <= tip2 && gear_tooth(dx, dy)) {
-                ink = 1;
-            }
             uint8_t *p = px + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
-            if (ink) {
-                p[0] = (uint8_t)ir;
-                p[1] = (uint8_t)ig;
-                p[2] = (uint8_t)ib;
-            } else {
-                p[0] = (uint8_t)pr;
-                p[1] = (uint8_t)pg;
-                p[2] = (uint8_t)pb;
-            }
+            p[0] = (uint8_t)pr;
+            p[1] = (uint8_t)pg;
+            p[2] = (uint8_t)pb;
             p[3] = 255;
         }
     }
+    int thick = side / 9;
+    if (thick < 2) {
+        thick = 2;
+    }
+    int span = side / 2;
+    if (span < thick) {
+        span = thick;
+    }
+    int gap = thick;
+    int total = thick * 3 + gap * 2;
+    int left = x + (side - span) / 2;
+    int top = y + (side - total) / 2;
+    for (int bar = 0; bar < 3; bar++) {
+        int by = top + bar * (thick + gap);
+        for (int row = 0; row < thick; row++) {
+            int yy = by + row;
+            if (yy < 0 || yy >= height) {
+                continue;
+            }
+            for (int col = 0; col < span; col++) {
+                int xx = left + col;
+                if (xx < 0 || xx >= width) {
+                    continue;
+                }
+                uint8_t *p = px + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
+                p[0] = (uint8_t)ir;
+                p[1] = (uint8_t)ig;
+                p[2] = (uint8_t)ib;
+                p[3] = 255;
+            }
+        }
+    }
+}
+
+int page_same_unit(const char *text, size_t text_len, size_t a, size_t b) {
+    if (!g_font_ok) {
+        return 0;
+    }
+    if (text == NULL) {
+        text = "";
+        text_len = 0;
+    }
+    if (a > text_len) {
+        a = text_len;
+    }
+    if (b > text_len) {
+        b = text_len;
+    }
+    float scale = stbtt_ScaleForPixelHeight(&g_font, 16.f);
+    struct Index idx;
+    memset(&idx, 0, sizeof idx);
+    if (build_index(&idx, text, text_len, a, 0, 100000, 16, 4, scale) != 0 || idx.n == 0) {
+        free(idx.lines);
+        return 0;
+    }
+    size_t la = 0;
+    size_t lb = 0;
+    int same = find_line(&idx, a, &la) && find_line(&idx, b, &lb) && unit_of(&idx, la) == unit_of(&idx, lb);
+    free(idx.lines);
+    return same;
 }

@@ -15,9 +15,11 @@
 #include <jni.h>
 
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LOG_TAG "penship"
@@ -54,6 +56,7 @@ struct App {
     Doc *doc;
     char path[1024];
     char copy_path[1024];
+    char last_path[1024];
     char open_id[2048];
     int session;
     unsigned char *fonts[3];
@@ -79,6 +82,12 @@ struct App {
     int drag_y;
     int drag_last;
     int drag_mode;
+    int64_t drag_at;
+    int64_t tap_at;
+    int tap_x;
+    int tap_y;
+    int tap_pending;
+    size_t tap_off;
     int edge;
     int edge_x;
     int edge_y;
@@ -262,22 +271,22 @@ static void render(struct App *app) {
     }
     page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
                      app->chrome.h, labels, app->chrome.vertical, text_px(density, 0));
-    if (app->settings && app->chrome.h[CHROME_SMALLER] > 0) {
+    if (app->settings && app->chrome.h[CHROME_OPEN] > 0) {
         char stat[48];
         snprintf(stat, sizeof stat, words == 1 ? "1 word" : "%d words", words);
         const char *stat_label = stat;
         int stat_px = text_px(density, 0);
         int stat_w = stat_px * 8;
-        int row_w = app->chrome.w[CHROME_SMALLER];
+        int row_w = app->chrome.w[CHROME_OPEN];
         if (stat_w > row_w / 2) {
             stat_w = row_w / 2;
         }
-        int stat_x = app->chrome.x[CHROME_SMALLER] + row_w - stat_w;
-        int stat_y = app->chrome.y[CHROME_SMALLER];
-        int stat_h = app->chrome.h[CHROME_SMALLER];
+        int stat_x = app->chrome.x[CHROME_OPEN] + row_w - stat_w;
+        int stat_y = app->chrome.y[CHROME_OPEN];
+        int stat_h = app->chrome.h[CHROME_OPEN];
         page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px);
     }
-    page_draw_gear(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
+    page_draw_menu(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
                    app->chrome.w[CHROME_SETTINGS]);
     glViewport(0, 0, width, height);
     glBindTexture(GL_TEXTURE_2D, app->texture);
@@ -297,6 +306,9 @@ static void render(struct App *app) {
 }
 
 static int write_uri(struct App *app);
+static void pick_file(struct App *app, int create);
+
+static volatile int g_reload;
 
 static void save_doc(struct App *app) {
     if (app->doc == NULL) {
@@ -415,6 +427,25 @@ static void read_insets(struct App *app, int *top, int *bottom) {
     (*env)->DeleteLocalRef(env, keyboard);
 }
 
+static void pick_file(struct App *app, int create) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL) {
+        return;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return;
+    }
+    jmethodID pick = (*env)->GetStaticMethodID(env, pen, "pick", "(Landroid/app/Activity;I)V");
+    if (jni_ok(env) && pick != NULL) {
+        (*env)->CallStaticVoidMethod(env, pen, pick, app->android->activity->clazz, create);
+        if (!jni_ok(env)) {
+            LOGE("pick failed");
+        }
+    }
+    (*env)->DeleteLocalRef(env, pen);
+}
+
 /* 1 and the id is written, 0 when this launch is the scratch note, -1 on failure. */
 static int copy_id(struct App *app, char *buf, size_t cap) {
     buf[0] = '\0';
@@ -525,6 +556,67 @@ static int write_uri(struct App *app) {
     return rc;
 }
 
+/* A file URI we opened ourselves. Rejects anything that is not an absolute path. */
+static int file_uri_path(const char *id, char *out, size_t cap) {
+    const char *prefix = "file://";
+    size_t prefix_n = strlen(prefix);
+    if (id == NULL || strncmp(id, prefix, prefix_n) != 0) {
+        return -1;
+    }
+    const char *path = id + prefix_n;
+    size_t n = strlen(path);
+    if (path[0] != '/' || n == 0 || n >= cap || strstr(path, "/../") != NULL || strstr(path, "/./") != NULL) {
+        return -1;
+    }
+    memcpy(out, path, n + 1);
+    return 0;
+}
+
+static void remember_last(struct App *app, const char *id) {
+    if (app->last_path[0] == '\0' || id == NULL || id[0] == '\0' || strlen(id) > 2000) {
+        return;
+    }
+    FILE *f = fopen(app->last_path, "w");
+    if (f == NULL) {
+        return;
+    }
+    if (fputs(id, f) < 0 || fputc('\n', f) == EOF) {
+        fclose(f);
+        return;
+    }
+    fclose(f);
+}
+
+/* The launcher intent has no document. Reopen the file from the last session. */
+static int reopen_last(struct App *app) {
+    if (app->last_path[0] == '\0') {
+        return -1;
+    }
+    FILE *f = fopen(app->last_path, "r");
+    if (f == NULL) {
+        return -1;
+    }
+    char id[2048];
+    if (fgets(id, (int)sizeof id, f) == NULL) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    size_t n = strlen(id);
+    if (n == 0 || id[n - 1] != '\n') {
+        return -1;
+    }
+    id[n - 1] = '\0';
+    char path[1024];
+    if (file_uri_path(id, path, sizeof path) != 0 || doc_load(app->doc, path) != 0) {
+        return -1;
+    }
+    memcpy(app->open_id, id, n);
+    app->session = SESSION_URI;
+    LOGI("reopened %s", id);
+    return 0;
+}
+
 /* Load the opened document, or the scratch note when the launch has none. */
 static int refresh_session(struct App *app) {
     char id[sizeof app->open_id];
@@ -553,11 +645,16 @@ static int refresh_session(struct App *app) {
         free(bytes);
         memcpy(app->open_id, id, strlen(id) + 1);
         app->session = SESSION_URI;
+        remember_last(app, id);
         LOGI("opened %zu bytes", n);
         return 1;
     }
-    if (app->session == SESSION_NOTE) {
-        return 0;
+    /* No document on this resume. Keep the note already open. */
+    if (app->session != SESSION_NONE) {
+        return kind < 0 ? -1 : 0;
+    }
+    if (reopen_last(app) == 0) {
+        return 1;
     }
     app->open_id[0] = '\0';
     if (app->path[0] == '\0' || doc_load(app->doc, app->path) != 0) {
@@ -833,6 +930,13 @@ static void apply_ime(struct App *app) {
     }
 }
 
+JNIEXPORT void JNICALL Java_penship_Pen_reload(JNIEnv *env, jclass cls, jint adopt) {
+    (void)env;
+    (void)cls;
+    g_reload = adopt ? 2 : 1;
+    ime_wake();
+}
+
 JNIEXPORT void JNICALL Java_penship_Pen_commitBytes(JNIEnv *env, jclass cls, jbyteArray array, jint composing) {
     (void)cls;
     if (array == NULL) {
@@ -931,6 +1035,29 @@ JNIEXPORT void JNICALL Java_penship_Pen_clip(JNIEnv *env, jclass cls, jint kind)
     }
 }
 
+enum { HOLD_MS = 400, TAP_MS = 300 };
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A held press selects from the finger. The anchor stays while the drag grows. */
+static void arm_select(struct App *app) {
+    size_t len = 0;
+    const char *text = doc_text(app->doc, &len);
+    size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h, text, len,
+                         doc_caret(app->doc), app->font_px, app->drag_x, app->drag_y);
+    doc_place(app->doc, at);
+    app->compose_n = 0;
+    app->drag_mode = 2;
+    page_set_follow(0);
+    render(app);
+}
+
 static int on_input(struct android_app *android, AInputEvent *event) {
     struct App *app = android->userData;
     if (app->doc == NULL) {
@@ -951,6 +1078,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             app->drag_y = y;
             app->drag_last = y;
             app->drag_mode = 0;
+            app->drag_at = now_ms();
             app->edge = 0;
             return 1;
         }
@@ -968,10 +1096,16 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             if (dy < 0) {
                 dy = -dy;
             }
-            /* shortcut: a drag scrolls, unless it starts on the caret, which selects. No fling. */
+            /* A quick drag scrolls, unless it starts on the caret. A held press selects. No fling. */
             if (app->drag_mode == 0 && (dx > 36 || dy > 36)) {
-                /* Centered mode keeps the caret on the middle line, so a drag moves the text. */
-                app->drag_mode = page_typewriter() ? 1 : (page_caret_near(app->drag_x, app->drag_y, 72) ? 2 : 1);
+                int held = now_ms() - app->drag_at >= HOLD_MS;
+                int near = page_caret_near(app->drag_x, app->drag_y, 72);
+                int kind = page_drag_kind(1, held, near, page_typewriter());
+                if (kind == 2) {
+                    arm_select(app);
+                } else {
+                    app->drag_mode = kind;
+                }
             }
             if (app->drag_mode == 1) {
                 int rows = page_center_drag(app->drag_last - y);
@@ -1004,14 +1138,29 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             app->drag = 0;
             app->edge = 0;
             if (dragged) {
+                app->tap_pending = 0;
+                app->tap_at = 0;
                 if (selecting) {
                     show_keyboard(app);
                 }
                 return 1;
             }
             int hit = chrome_hit(&app->chrome, x, y);
+            if (hit >= 0) {
+                app->tap_pending = 0;
+                app->tap_at = 0;
+            }
             if (hit == CHROME_SETTINGS) {
                 app->settings = 1;
+            } else if (hit == CHROME_OPEN) {
+                app->settings = 0;
+                pick_file(app, 0);
+            } else if (hit == CHROME_SAVE) {
+                save_doc(app);
+                app->settings = 0;
+                if (app->session != SESSION_URI) {
+                    pick_file(app, 1);
+                }
             } else if (hit == CHROME_DONE) {
                 app->settings = 0;
             } else if (app->settings && hit < 0) {
@@ -1041,15 +1190,34 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 const char *text = doc_text(app->doc, &len);
                 size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h,
                                      text, len, doc_caret(app->doc), app->font_px, x, y);
-                if (doc_toggle_task(app->doc, at) == 0) {
-                    save_doc(app);
-                    page_set_follow(1);
-                    render(app);
-                    return 1;
+                int64_t t = now_ms();
+                int ddx = x - app->tap_x;
+                int ddy = y - app->tap_y;
+                if (ddx < 0) {
+                    ddx = -ddx;
                 }
-                doc_place(app->doc, at);
+                if (ddy < 0) {
+                    ddy = -ddy;
+                }
+                int doubled = app->tap_at != 0 && t >= app->tap_at && t - app->tap_at <= TAP_MS && ddx < 48 && ddy < 48;
+                app->tap_x = x;
+                app->tap_y = y;
+                app->tap_at = t;
+                app->tap_pending = 0;
+                if (doubled) {
+                    doc_place(app->doc, at);
+                    page_set_editing(1);
+                } else {
+                    if (!(page_editing() && page_same_unit(text, len, doc_caret(app->doc), at))) {
+                        page_set_editing(0);
+                    }
+                    doc_place(app->doc, at);
+                    app->tap_pending = 1;
+                    app->tap_off = doc_caret(app->doc);
+                }
                 app->compose_n = 0;
-                page_set_follow(1);
+                /* A tap stays on this page. Dragging is what scrolls. */
+                page_set_follow(0);
                 render(app);
                 show_keyboard(app);
                 return 1;
@@ -1304,6 +1472,10 @@ void android_main(struct android_app *android) {
         if (wrote < 0 || (size_t)wrote >= sizeof app.copy_path) {
             app.copy_path[0] = '\0';
         }
+        wrote = snprintf(app.last_path, sizeof app.last_path, "%s/last", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.last_path) {
+            app.last_path[0] = '\0';
+        }
     }
     refresh_session(&app);
     static const char *k_faces[] = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
@@ -1329,9 +1501,27 @@ void android_main(struct android_app *android) {
     while (!android->destroyRequested) {
         int events = 0;
         struct android_poll_source *source = NULL;
-        int wait = app.edge != 0 ? 32 : -1;
+        int wait = -1;
+        if (app.edge != 0 && app.drag_mode == 2) {
+            wait = 32;
+        } else if (app.drag && app.drag_mode == 0) {
+            int64_t left = app.drag_at + HOLD_MS - now_ms();
+            wait = left < 1 ? 1 : (left > 1000 ? 1000 : (int)left);
+        } else if (app.tap_pending) {
+            int64_t left = app.tap_at + TAP_MS - now_ms();
+            wait = left < 1 ? 1 : (left > 1000 ? 1000 : (int)left);
+        }
         int ident = ALooper_pollOnce(wait, NULL, &events, (void **)&source);
-        if (ident == ALOOPER_POLL_TIMEOUT && app.edge != 0 && app.drag_mode == 2) {
+        if (ident == ALOOPER_POLL_TIMEOUT && app.tap_pending && now_ms() - app.tap_at >= TAP_MS) {
+            app.tap_pending = 0;
+            if (doc_caret(app.doc) == app.tap_off && doc_toggle_task(app.doc, app.tap_off) == 0) {
+                save_doc(&app);
+                page_set_follow(0);
+                render(&app);
+            }
+        } else if (ident == ALOOPER_POLL_TIMEOUT && app.drag && app.drag_mode == 0 && now_ms() - app.drag_at >= HOLD_MS) {
+            arm_select(&app);
+        } else if (ident == ALOOPER_POLL_TIMEOUT && app.edge != 0 && app.drag_mode == 2) {
             page_scroll_by(app.edge > 0 ? 64 : -64);
             size_t len = 0;
             const char *text = doc_text(app.doc, &len);
@@ -1344,6 +1534,17 @@ void android_main(struct android_app *android) {
             while (read(g_ime_fd[0], buf, sizeof buf) > 0) {
             }
             apply_ime(&app);
+            int reload = g_reload;
+            g_reload = 0;
+            if (reload == 2 && write_uri(&app) == 0) {
+                refresh_session(&app);
+            } else if (reload == 1) {
+                refresh_session(&app);
+            }
+            if (reload != 0) {
+                app.settings = 0;
+                render(&app);
+            }
         } else if (ident >= 0 && source != NULL) {
             source->process(android, source);
         }

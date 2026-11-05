@@ -3,8 +3,8 @@
 #include <limits.h>
 #include <stddef.h>
 
-static const char *k_labels[CHROME_COUNT] = {"Smaller", "Larger", "Font", "Typewriter", "Focus", "Theme",
-                                             "Source", "Settings", "Done"};
+static const char *k_labels[CHROME_COUNT] = {"Open",     "Save",    "Smaller", "Larger", "Font", "Typewriter",
+                                             "Focus",    "Theme",   "Source",  "Menu",   "Done"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -108,8 +108,8 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         inner = 1;
     }
     if (settings) {
-        static const int k_rows[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT, CHROME_TYPEWRITER,
-                                    CHROME_FOCUS,    CHROME_THEME,  CHROME_SOURCE, CHROME_DONE};
+        static const int k_rows[] = {CHROME_OPEN,  CHROME_SAVE,     CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,
+                                    CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_THEME,  CHROME_SOURCE, CHROME_DONE};
         int n = (int)(sizeof k_rows / sizeof k_rows[0]);
         int item_h = inner / n;
         if (item_h < 1) {
@@ -128,7 +128,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         chrome->text_h = 1;
         return;
     }
-    /* The gear floats at the end, under the status inset. The keyboard covers the bottom. */
+    /* The menu mark floats at the end, under the status inset. The keyboard covers the bottom. */
     int side = thumb;
     if (side > width) {
         side = width;
