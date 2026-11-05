@@ -60,6 +60,7 @@ struct App {
     int font_lens[3];
     int face;
     int step;
+    int settings;
     int compose_n;
     size_t compose_end;
     struct Chrome chrome;
@@ -245,30 +246,39 @@ static void render(struct App *app) {
         density = AConfiguration_getDensity(app->android->config);
     }
     app->font_px = text_px(density, app->step);
-    chrome_place(&app->chrome, width, height, inset_top, inset_bottom, density);
+    chrome_place(&app->chrome, width, height, inset_top, inset_bottom, density, app->settings);
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
+    /* Count before a settings frame, which paints an empty page and would report zero words. */
     page_draw(app->pixels, width, height, app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
               app->chrome.text_h, text, len, doc_caret(app->doc), doc_anchor(app->doc), app->font_px);
-    char stat[48];
     int words = page_words();
-    snprintf(stat, sizeof stat, words == 1 ? "1 word" : "%d words", words);
-    const char *stat_label = stat;
-    int stat_px = text_px(density, 0);
-    int stat_w = stat_px * 8;
-    if (stat_w > app->chrome.text_w) {
-        stat_w = app->chrome.text_w;
+    if (app->settings) {
+        page_draw(app->pixels, width, height, 0, 0, 1, 1, "", 0, 0, 0, app->font_px);
     }
-    int stat_x = app->chrome.text_x + app->chrome.text_w - stat_w;
-    int stat_y = app->chrome.text_y;
-    int stat_h = stat_px + 4;
-    page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px);
     const char *labels[CHROME_COUNT];
     for (int i = 0; i < CHROME_COUNT; i++) {
-        labels[i] = chrome_label(i);
+        labels[i] = i == CHROME_SETTINGS ? "" : chrome_label(i);
     }
     page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
                      app->chrome.h, labels, app->chrome.vertical, text_px(density, 0));
+    if (app->settings && app->chrome.h[CHROME_SMALLER] > 0) {
+        char stat[48];
+        snprintf(stat, sizeof stat, words == 1 ? "1 word" : "%d words", words);
+        const char *stat_label = stat;
+        int stat_px = text_px(density, 0);
+        int stat_w = stat_px * 8;
+        int row_w = app->chrome.w[CHROME_SMALLER];
+        if (stat_w > row_w / 2) {
+            stat_w = row_w / 2;
+        }
+        int stat_x = app->chrome.x[CHROME_SMALLER] + row_w - stat_w;
+        int stat_y = app->chrome.y[CHROME_SMALLER];
+        int stat_h = app->chrome.h[CHROME_SMALLER];
+        page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px);
+    }
+    page_draw_gear(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
+                   app->chrome.w[CHROME_SETTINGS]);
     glViewport(0, 0, width, height);
     glBindTexture(GL_TEXTURE_2D, app->texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, app->pixels);
@@ -1000,7 +1010,14 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 return 1;
             }
             int hit = chrome_hit(&app->chrome, x, y);
-            if (hit == CHROME_SMALLER && app->step > 0) {
+            if (hit == CHROME_SETTINGS) {
+                app->settings = 1;
+            } else if (hit == CHROME_DONE) {
+                app->settings = 0;
+            } else if (app->settings && hit < 0) {
+                render(app);
+                return 1;
+            } else if (hit == CHROME_SMALLER && app->step > 0) {
                 app->step--;
             } else if (hit == CHROME_LARGER && app->step + 1 < text_step_count()) {
                 app->step++;
@@ -1050,6 +1067,11 @@ static int on_input(struct android_app *android, AInputEvent *event) {
     int shift = (meta & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) != 0;
     int ctrl = (meta & (AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON)) != 0;
     if (code == AKEYCODE_BACK) {
+        if (app->settings) {
+            app->settings = 0;
+            render(app);
+            return 1;
+        }
         return 0;
     }
     if (ctrl && shift &&
@@ -1124,6 +1146,15 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             render(app);
         }
         return 1;
+    }
+    if (code == AKEYCODE_SYSTEM_NAVIGATION_UP) {
+        code = AKEYCODE_DPAD_UP;
+    } else if (code == AKEYCODE_SYSTEM_NAVIGATION_DOWN) {
+        code = AKEYCODE_DPAD_DOWN;
+    } else if (code == AKEYCODE_SYSTEM_NAVIGATION_LEFT) {
+        code = AKEYCODE_DPAD_LEFT;
+    } else if (code == AKEYCODE_SYSTEM_NAVIGATION_RIGHT) {
+        code = AKEYCODE_DPAD_RIGHT;
     }
     if (ctrl && !shift && (code == AKEYCODE_DPAD_UP || code == AKEYCODE_DPAD_DOWN)) {
         size_t len = 0;

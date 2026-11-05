@@ -294,12 +294,72 @@ static void test_rendered(const unsigned char *font, int font_len) {
     if (px == NULL) {
         return;
     }
-    const char *head = "# H\nZ";
+    const char *head = "## H\nZ";
     page_draw(px, width, height, 0, 0, width, height, head, strlen(head), 0, 0, font_px);
     int head_source = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
     page_draw(px, width, height, 0, 0, width, height, head, strlen(head), strlen(head), strlen(head), font_px);
     int head_rendered = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
     expect(head_rendered > 0 && head_rendered < head_source, "rendered heading hides the hashes");
+
+    const char *h1 = "# Hi\nZ";
+    const char *h2 = "## Hi\nZ";
+    page_draw(px, width, height, 0, 0, width, height, h1, strlen(h1), strlen(h1), strlen(h1), font_px);
+    int h1_lo = height;
+    int h1_hi = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = (int)p[0] - PAGE_HEAD_R;
+            int dg = (int)p[1] - PAGE_HEAD_G;
+            int db = (int)p[2] - PAGE_HEAD_B;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 12 && dg <= 12 && db <= 12) {
+                if (y < h1_lo) {
+                    h1_lo = y;
+                }
+                if (y > h1_hi) {
+                    h1_hi = y;
+                }
+            }
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, h2, strlen(h2), strlen(h2), strlen(h2), font_px);
+    int h2_lo = height;
+    int h2_hi = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = (int)p[0] - PAGE_HEAD_R;
+            int dg = (int)p[1] - PAGE_HEAD_G;
+            int db = (int)p[2] - PAGE_HEAD_B;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 12 && dg <= 12 && db <= 12) {
+                if (y < h2_lo) {
+                    h2_lo = y;
+                }
+                if (y > h2_hi) {
+                    h2_hi = y;
+                }
+            }
+        }
+    }
+    expect(h1_hi > h1_lo && h2_hi > h2_lo && h1_hi - h1_lo > h2_hi - h2_lo, "a single hash is taller than two");
 
     const char *list = "- H\nZ";
     page_draw(px, width, height, 0, 0, width, height, list, strlen(list), 0, 0, font_px);
@@ -341,7 +401,7 @@ static void test_rendered(const unsigned char *font, int font_len) {
     expect(setext_rendered > 0 && setext_source > setext_rendered, "source mode shows the setext marks");
     page_set_source(0);
 
-    const char *hashes = "# H\nZ";
+    const char *hashes = "## H\nZ";
     page_draw(px, width, height, 0, 0, width, height, hashes, strlen(hashes), strlen(hashes), strlen(hashes), font_px);
     int hybrid = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
     page_set_source(1);
@@ -385,6 +445,24 @@ static void test_rendered(const unsigned char *font, int font_len) {
     expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an image shows its alt text");
     expect(image_source > image_rendered, "a rendered image hides the markup");
 
+    const char *link = "[Hi](http://example.com)\nZ";
+    page_draw(px, width, height, 0, 0, width, height, link, strlen(link), 0, 0, font_px);
+    int link_source = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            link_source += ink_at(px, width, x, y);
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, link, strlen(link), strlen(link), strlen(link), font_px);
+    int link_rendered = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            link_rendered += ink_at(px, width, x, y);
+        }
+    }
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "a rendered link shows its words");
+    expect(link_source > link_rendered, "a rendered link hides the address");
+
     const char *tilde = "~~~\na\n~~~\nZ";
     page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), 4, 4, font_px);
     int tilde_source = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
@@ -417,6 +495,72 @@ static void test_rendered(const unsigned char *font, int font_len) {
         }
     }
     expect(nested_x > flat_x, "a nested list indents its bullet");
+
+    const char *bullet_go = "- Go\nZ";
+    const char *ordered_go = "12. Go\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bullet_go, strlen(bullet_go), strlen(bullet_go), strlen(bullet_go), font_px);
+    int bullet_lo = width;
+    int bullet_hi = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            size_t i = ((size_t)y * (size_t)width + (size_t)x) * 4;
+            if (px[i] == PAGE_LIST_R && px[i + 1] == PAGE_LIST_G && px[i + 2] == PAGE_LIST_B) {
+                if (x < bullet_lo) {
+                    bullet_lo = x;
+                }
+                if (x > bullet_hi) {
+                    bullet_hi = x;
+                }
+            }
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, ordered_go, strlen(ordered_go), strlen(ordered_go), strlen(ordered_go), font_px);
+    int ordered_lo = width;
+    int ordered_hi = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            size_t i = ((size_t)y * (size_t)width + (size_t)x) * 4;
+            if (px[i] == PAGE_LIST_R && px[i + 1] == PAGE_LIST_G && px[i + 2] == PAGE_LIST_B) {
+                if (x < ordered_lo) {
+                    ordered_lo = x;
+                }
+                if (x > ordered_hi) {
+                    ordered_hi = x;
+                }
+            }
+        }
+    }
+    expect(ordered_hi > ordered_lo && ordered_hi - ordered_lo > bullet_hi - bullet_lo, "an ordered item keeps its number");
+
+    const char *em_line = "*Hi*\nZ";
+    page_draw(px, width, height, 0, 0, width, height, em_line, strlen(em_line), strlen(em_line), strlen(em_line), font_px);
+    expect(near_rgb(px, width, height, PAGE_EM_R, PAGE_EM_G, PAGE_EM_B), "emphasis stays colored");
+    const char *plain_go = "Go\nZ";
+    page_draw(px, width, height, 0, 0, width, height, plain_go, strlen(plain_go), strlen(plain_go), strlen(plain_go), font_px);
+    int plain_ink = count_near(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B);
+    const char *heavy = "**Go**\nZ";
+    page_draw(px, width, height, 0, 0, width, height, heavy, strlen(heavy), strlen(heavy), strlen(heavy), font_px);
+    int heavy_ink = count_near(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B);
+    expect(!near_rgb(px, width, height, PAGE_EM_R, PAGE_EM_G, PAGE_EM_B), "strong is not the emphasis color");
+    expect(heavy_ink > plain_ink, "strong is heavier than the same letters");
+
+    const char *code_line = "`Go`\nZ";
+    page_draw(px, width, height, 0, 0, width, height, code_line, strlen(code_line), 0, 0, font_px);
+    int code_source = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            code_source += ink_at(px, width, x, y);
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, code_line, strlen(code_line), strlen(code_line), strlen(code_line), font_px);
+    int code_rendered = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            code_rendered += ink_at(px, width, x, y);
+        }
+    }
+    expect(near_rgb(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B), "rendered code keeps its word");
+    expect(code_source > code_rendered, "rendered code hides its ticks");
 
     const char *counted = "one two\nthree";
     page_draw(px, width, height, 0, 0, width, height, counted, strlen(counted), 0, 0, font_px);
@@ -464,6 +608,56 @@ static void test_label(const unsigned char *font, int font_len) {
     page_draw_labels(px, width, height, 1, xs, ys, ws, hs, labels, 0, 32);
     expect(near_rgb(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B), "a label is drawn");
     expect(px[0] == 0 && px[1] == 0 && px[2] == 0, "a label stays inside its cell");
+    memset(px, 0, (size_t)width * (size_t)height * 4);
+    const char *empty[] = {""};
+    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, empty, 0, 32);
+    expect(px[0] == 0, "an empty label draws nothing");
+    free(px);
+}
+
+static int px_eq(const uint8_t *px, int width, int x, int y, int r, int g, int b) {
+    const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+    return p[0] == (uint8_t)r && p[1] == (uint8_t)g && p[2] == (uint8_t)b && p[3] == 255;
+}
+
+static void test_gear(void) {
+    const int width = 96;
+    const int height = 96;
+    const int x0 = 8;
+    const int y0 = 8;
+    const int side = 64;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "gear alloc");
+    if (px == NULL) {
+        return;
+    }
+    page_set_theme(0);
+    page_draw_gear(px, width, height, x0, y0, side);
+    int cx = x0 + side / 2;
+    int cy = y0 + side / 2;
+    int mid = (side / 4 + side * 13 / 32) / 2;
+    expect(px_eq(px, width, cx, cy, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B), "the gear has a hole");
+    expect(px_eq(px, width, cx + mid, cy, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B), "a tooth is ink");
+    expect(px_eq(px, width, cx + mid * 924 / 1000, cy + mid * 383 / 1000, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B),
+           "a gap between teeth stays the button");
+    expect(px[((size_t)y0 * (size_t)width + (size_t)x0) * 4] == 0, "the corner outside the disc stays clear");
+    int ink = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (px_eq(px, width, x, y, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B)) {
+                ink++;
+            }
+        }
+    }
+    expect(ink > 200, "the gear is more than a speck");
+    memset(px, 0, (size_t)width * (size_t)height * 4);
+    page_set_theme(1);
+    page_draw_gear(px, width, height, x0, y0, side);
+    expect(px_eq(px, width, cx, cy, PAGE_NIGHT_PAPER_R, PAGE_NIGHT_PAPER_G, PAGE_NIGHT_PAPER_B),
+           "the hole follows the night paper");
+    expect(px_eq(px, width, cx + mid, cy, PAGE_NIGHT_INK_R, PAGE_NIGHT_INK_G, PAGE_NIGHT_INK_B),
+           "a tooth follows the night ink");
+    page_set_theme(0);
     free(px);
 }
 
@@ -580,6 +774,7 @@ int main(void) {
         test_rendered(font, font_len);
         test_modes(font, font_len);
         test_label(font, font_len);
+        test_gear();
         test_selection_paint(font, font_len);
         test_tall_note(font, font_len);
         test_scroll(font, font_len);

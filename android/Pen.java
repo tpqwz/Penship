@@ -311,9 +311,27 @@ class ImeView extends android.view.View {
         return true;
     }
 
-    @Override
-    public boolean onKeyPreIme(int keyCode, android.view.KeyEvent event) {
-        /* Gboard takes hardware keys once this view is the editor. Claim the editing keys here. */
+    /* Arrows move the caret. A software keyboard that fails to move it also sends a newline,
+       which would push the text after the caret down. PenInput drops that newline. */
+    static boolean claimKey(android.view.KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        if (isArrow(keyCode)) {
+            if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) {
+                return true;
+            }
+            if (event.isCtrlPressed() && !event.isShiftPressed() && isVertical(keyCode)) {
+                Pen.heading(isDown(keyCode) ? 1 : -1);
+                return true;
+            }
+            if (!event.isCtrlPressed()) {
+                int dir = isDown(keyCode) || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                        || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_RIGHT ? 1 : -1;
+                int rows = isVertical(keyCode) ? 1 : 0;
+                Pen.motion(dir, rows, event.isShiftPressed() ? 1 : 0);
+                return true;
+            }
+            return false;
+        }
         if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) {
             return false;
         }
@@ -321,34 +339,11 @@ class ImeView extends android.view.View {
             Pen.tableTab(event.isShiftPressed() ? -1 : 1);
             return true;
         }
-        if (event.isCtrlPressed() && !event.isShiftPressed()
-                && (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
-                        || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN)) {
-            Pen.heading(keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ? 1 : -1);
-            return true;
-        }
         if (!event.isCtrlPressed() && keyCode == android.view.KeyEvent.KEYCODE_FORWARD_DEL) {
             Pen.eraseForward(1);
             return true;
         }
         if (!event.isCtrlPressed()) {
-            int dir = 0;
-            int rows = 0;
-            if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
-                dir = -1;
-            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
-                dir = 1;
-            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP) {
-                dir = -1;
-                rows = 1;
-            } else if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN) {
-                dir = 1;
-                rows = 1;
-            }
-            if (dir != 0) {
-                Pen.motion(dir, rows, event.isShiftPressed() ? 1 : 0);
-                return true;
-            }
             return false;
         }
         if (event.getRepeatCount() != 0) {
@@ -388,6 +383,43 @@ class ImeView extends android.view.View {
         return false;
     }
 
+    private static boolean isArrow(int keyCode) {
+        return keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_LEFT
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_RIGHT
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_UP
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_DOWN;
+    }
+
+    private static boolean isVertical(int keyCode) {
+        return keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_UP
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_DOWN;
+    }
+
+    private static boolean isDown(int keyCode) {
+        return keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_DOWN;
+    }
+
+    @Override
+    public boolean onKeyPreIme(int keyCode, android.view.KeyEvent event) {
+        /* Gboard takes hardware keys once this view is the editor. Claim the editing keys here. */
+        return claimKey(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
+        if (claimKey(event)) {
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
     @Override
     public android.view.inputmethod.InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo outAttrs) {
         outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
@@ -401,13 +433,41 @@ class ImeView extends android.view.View {
 
 /** Keyboard commits land here and are queued for the native thread. */
 class PenInput extends android.view.inputmethod.BaseInputConnection {
+    private final android.view.View view;
+    /* Set when Down was just handled. Cleared on the next loop turn, so a fallback newline
+       from that same key is dropped and a later Enter still starts a line. */
+    static boolean dropNewline;
+
     PenInput(android.view.View view) {
         super(view, true);
+        this.view = view;
+    }
+
+    @Override
+    public boolean sendKeyEvent(android.view.KeyEvent event) {
+        boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN
+                && (event.getKeyCode() == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                        || event.getKeyCode() == android.view.KeyEvent.KEYCODE_SYSTEM_NAVIGATION_DOWN);
+        if (ImeView.claimKey(event)) {
+            if (down) {
+                dropNewline = true;
+                view.post(() -> dropNewline = false);
+            }
+            return true;
+        }
+        return super.sendKeyEvent(event);
     }
 
     @Override
     public boolean commitText(CharSequence text, int newCursorPosition) {
-        Pen.commit(text == null ? "" : text.toString(), 0);
+        String s = text == null ? "" : text.toString();
+        if (dropNewline && "\n".equals(s)) {
+            dropNewline = false;
+            android.util.Log.i("penship", "drop newline from down arrow");
+            return true;
+        }
+        dropNewline = false;
+        Pen.commit(s, 0);
         return true;
     }
 

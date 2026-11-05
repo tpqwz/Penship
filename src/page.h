@@ -97,8 +97,12 @@ int page_caret_near(int x, int y, int slop);
 /* -1 when y is in the top zone, 1 in the bottom zone, otherwise 0. */
 int page_edge(int y, int top, int bottom, int zone);
 
-/* Draw short labels inside the given cells. A wide layout draws the hairline on the right. */
+/* Draw short labels inside the given cells. A wide layout draws the hairline on the right.
+   An empty label draws nothing. */
 void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, const int *ys, const int *ws,
                       const int *hs, const char *const *labels, int vertical, int font_px);
+
+/* A gear button: a paper disc, an ink ring, and eight teeth. side is the cell. */
+void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side);
 
 #endif

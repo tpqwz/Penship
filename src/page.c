@@ -290,7 +290,7 @@ static void solid_bar(uint8_t *px, int width, int height, int x, int y, int w, i
 }
 
 enum { KIND_BODY = 0, KIND_HEAD = 1, KIND_EM = 2, KIND_CODE = 3, KIND_LINK = 4, KIND_LIST = 5, KIND_QUOTE = 6,
-       KIND_STRIKE = 7, KIND_RULE = 8, KIND_TABLE = 9, KIND_IMAGE = 10, KIND_SKIP = 11 };
+       KIND_STRIKE = 7, KIND_RULE = 8, KIND_TABLE = 9, KIND_IMAGE = 10, KIND_SKIP = 11, KIND_STRONG = 12 };
 
 enum { TABLE_COLS = 8 };
 
@@ -410,6 +410,46 @@ static int is_heading(const char *s, size_t n) {
         return 0;
     }
     return hashes == n || s[hashes] == ' ' || s[hashes] == '\t';
+}
+
+/* 1 through 6 for an ATX heading, otherwise 0. */
+static int atx_level(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && i < 3 && s[i] == ' ') {
+        i++;
+    }
+    if (i >= n || s[i] != '#') {
+        return 0;
+    }
+    int level = 0;
+    while (i < n && s[i] == '#' && level < 6) {
+        level++;
+        i++;
+    }
+    if (level == 0 || (i < n && s[i] != ' ' && s[i] != '\t')) {
+        return 0;
+    }
+    return level;
+}
+
+/* A rendered single-hash heading uses two body rows and a larger face.
+   The caret line stays body size so the marks being edited do not jump. */
+static void head_face(const char *text, size_t off, size_t content, size_t caret, int line_h, float scale, int *use_h,
+                      float *use_scale, int *slots) {
+    *use_h = line_h < 1 ? 1 : line_h;
+    *use_scale = scale;
+    *slots = 1;
+    if (g_source || (caret >= off && caret <= off + content)) {
+        return;
+    }
+    if (atx_level(text + off, content) != 1) {
+        return;
+    }
+    if (*use_h <= INT_MAX / 2) {
+        *use_h *= 2;
+    }
+    *use_scale = scale * 1.5f;
+    *slots = 2;
 }
 
 /* Three or more of the same -, *, or _, spaces allowed. */
@@ -594,9 +634,11 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
                 j++;
             }
             if (j < n) {
-                for (size_t k = i; k <= j; k++) {
+                mark[i] = KIND_SKIP;
+                for (size_t k = i + 1; k < j; k++) {
                     mark[k] = KIND_CODE;
                 }
+                mark[j] = KIND_SKIP;
                 i = j + 1;
                 continue;
             }
@@ -649,8 +691,12 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
                     end++;
                 }
                 if (end < n) {
-                    for (size_t k = i; k <= end; k++) {
+                    mark[i] = KIND_SKIP;
+                    for (size_t k = i + 1; k < bracket; k++) {
                         mark[k] = KIND_LINK;
+                    }
+                    for (size_t k = bracket; k <= end; k++) {
+                        mark[k] = KIND_SKIP;
                     }
                     i = end + 1;
                     continue;
@@ -675,11 +721,22 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
             }
             if (found) {
                 size_t end = strong ? j + 1 : j;
-                for (size_t k = i; k <= end && k < n; k++) {
-                    mark[k] = KIND_EM;
+                if (end < n) {
+                    mark[i] = KIND_SKIP;
+                    if (strong && i + 1 < n) {
+                        mark[i + 1] = KIND_SKIP;
+                    }
+                    size_t word = i + (strong ? (size_t)2 : (size_t)1);
+                    for (size_t k = word; k < j && k < n; k++) {
+                        mark[k] = (uint8_t)(strong ? KIND_STRONG : KIND_EM);
+                    }
+                    mark[j] = KIND_SKIP;
+                    if (strong && j + 1 < n) {
+                        mark[j + 1] = KIND_SKIP;
+                    }
+                    i = end + 1;
+                    continue;
                 }
-                i = end + 1;
-                continue;
             }
         }
         i++;
@@ -781,9 +838,9 @@ static size_t block_prefix(const char *s, size_t n, int *quote, int *list, int *
             digits++;
         }
         if (digits > i && digits + 1 < n && s[digits] == '.' && s[digits + 1] == ' ') {
-            *list = 1;
+            /* 4: paint the digits. A bullet square would hide the count. */
+            *list = 4;
             any = 1;
-            i = digits + 2;
         }
     }
     return any ? i : 0;
@@ -898,7 +955,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                         slot_rgb(SLOT_LIST, &lr, &lg, &lb);
                         if (list == 1) {
                             fill_rect(px, width, height, x, by, side, side, lr, lg, lb);
-                        } else {
+                        } else if (list != 4) {
                             int t = side / 6;
                             if (t < 2) {
                                 t = 2;
@@ -912,7 +969,9 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                             }
                         }
                     }
-                    x += side + space_px;
+                    if (list != 4 && x <= INT_MAX - side - space_px) {
+                        x += side + space_px;
+                    }
                 }
             }
         }
@@ -1019,6 +1078,14 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                 for (int by = 0; by < gh; by++) {
                     for (int bx = 0; bx < gw; bx++) {
                         blend(px, width, height, dest_x + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                    }
+                }
+                /* The regular face has no bold. A second stamp is the strong weight. */
+                if (kind == KIND_STRONG && dest_x < INT_MAX) {
+                    for (int by = 0; by < gh; by++) {
+                        for (int bx = 0; bx < gw; bx++) {
+                            blend(px, width, height, dest_x + 1 + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                        }
                     }
                 }
             }
@@ -1133,10 +1200,17 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
         int cx = origin_x;
         int crow = 0;
-        uint32_t rows = layout_line(NULL, 0, 0, text, off, content, caret, origin_x, max_x, 0, line_h, 0, space_px,
-                                    scale, 0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
+        int use_h = line_h;
+        float use_scale = scale;
+        int slots = 1;
+        head_face(text, off, content, caret, line_h, scale, &use_h, &use_scale, &slots);
+        uint32_t rows = layout_line(NULL, 0, 0, text, off, content, caret, origin_x, max_x, 0, use_h, 0, space_px,
+                                    use_scale, 0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
         if (rows == 0) {
             rows = 1;
+        }
+        if (slots == 2 && rows <= UINT32_MAX / 2) {
+            rows *= 2;
         }
         struct Line line = {off, content, rows, (uint8_t)kind};
         if (index_push(idx, line) != 0) {
@@ -1624,10 +1698,19 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
             }
             int cx = 0;
             int crow = 0;
+            int use_h = line_h;
+            float use_scale = scale;
+            int slots = 1;
+            head_face(text, line.off, line.content, caret, line_h, scale, &use_h, &use_scale, &slots);
+            int use_base = baseline;
+            if (slots == 2) {
+                use_base = (int)((float)ascent * use_scale + 0.5f);
+            }
             /* shortcut: a rendered line keeps the source row count. */
-            layout_line(px, width, height, text, line.off, line.content, caret, origin_x, max_x, origin_y, line_h,
-                        baseline, space_px, scale, 1, y, scroll, view_h, sel_lo, sel_hi, source, marks, line.kind,
+            layout_line(px, width, height, text, line.off, line.content, caret, origin_x, max_x, origin_y, use_h,
+                        use_base, space_px, use_scale, 1, y, scroll, view_h, sel_lo, sel_hi, source, marks, line.kind,
                         &cx, &crow);
+            (void)slots;
             free(mark);
         }
         y = next;
@@ -1751,9 +1834,14 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
         source = 1;
     }
     uint64_t into = doc_y >= line_y ? doc_y - line_y : 0;
+    int use_h = line_h;
+    float use_scale = scale;
+    int slots = 1;
+    head_face(text, line.off, line.content, caret, line_h, scale, &use_h, &use_scale, &slots);
+    (void)slots;
     int hit_row = 0;
-    if (line_h > 0 && into / (uint64_t)line_h <= (uint64_t)INT_MAX) {
-        hit_row = (int)(into / (uint64_t)line_h);
+    if (use_h > 0 && into / (uint64_t)use_h <= (uint64_t)INT_MAX) {
+        hit_row = (int)(into / (uint64_t)use_h);
     }
     g_seek = 1;
     g_seek_x = x;
@@ -1762,8 +1850,8 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     g_seek_dist = INT_MAX;
     int cx = 0;
     int crow = 0;
-    layout_line(NULL, 0, 0, text, line.off, line.content, caret, origin_x, max_x, origin_y, line_h, 0, space_px,
-                scale, 0, line_y, scroll, view_h, 0, 0, source, NULL, line.kind, &cx, &crow);
+    layout_line(NULL, 0, 0, text, line.off, line.content, caret, origin_x, max_x, origin_y, use_h, 0, space_px,
+                use_scale, 0, line_y, scroll, view_h, 0, 0, source, NULL, line.kind, &cx, &crow);
     g_seek = 0;
     size_t at = g_seek_at;
     free(idx.lines);
@@ -1800,6 +1888,10 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
         if (cell_w <= 0 || cell_h <= 0) {
             continue;
         }
+        const char *s = labels[i] != NULL ? labels[i] : "";
+        if (s[0] == '\0') {
+            continue;
+        }
         if (vertical) {
             for (int row = 0; row < cell_h; row++) {
                 blend(px, width, height, x0 + cell_w - 1, y0 + row, 255, ir, ig, ib);
@@ -1809,7 +1901,6 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
                 blend(px, width, height, x0 + col, y0, 255, ir, ig, ib);
             }
         }
-        const char *s = labels[i] != NULL ? labels[i] : "";
         int x = x0 + font_px / 3;
         int y = y0 + (cell_h - line_h) / 2;
         if (y < y0) {
@@ -1845,6 +1936,121 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
                 }
             }
             x += advance;
+        }
+    }
+}
+
+/* Eight teeth: near an axis or a diagonal, with a gap between them. */
+static int gear_tooth(int dx, int dy) {
+    int64_t ax = dx < 0 ? -(int64_t)dx : (int64_t)dx;
+    int64_t ay = dy < 0 ? -(int64_t)dy : (int64_t)dy;
+    int64_t major = ax > ay ? ax : ay;
+    int64_t minor = ax > ay ? ay : ax;
+    if (major <= 0) {
+        return 1;
+    }
+    if (minor * 4 <= major) {
+        return 1;
+    }
+    int64_t diff = ax > ay ? ax - ay : ay - ax;
+    return diff * 4 <= major;
+}
+
+void page_draw_gear(uint8_t *px, int width, int height, int x, int y, int side) {
+    if (px == NULL || width < 1 || height < 1 || side < 1) {
+        return;
+    }
+    if (side > 1024) {
+        side = 1024;
+    }
+    if (x >= width || y >= height || x < -1024 || y < -1024) {
+        return;
+    }
+    if (x + side <= 0 || y + side <= 0) {
+        return;
+    }
+    if ((x > 0 && side / 2 > INT_MAX - x) || (y > 0 && side / 2 > INT_MAX - y)) {
+        return;
+    }
+    int cx = x + side / 2;
+    int cy = y + side / 2;
+    int plate = side / 2;
+    if (plate < 1) {
+        plate = 1;
+    }
+    int hole = side / 8;
+    int root = side / 4;
+    int tip = side * 13 / 32;
+    int ring = plate - side / 16;
+    if (hole < 1) {
+        hole = 1;
+    }
+    if (root <= hole) {
+        root = hole + 1;
+    }
+    if (tip <= root) {
+        tip = root + 1;
+    }
+    if (ring < 1) {
+        ring = 1;
+    }
+    if (ring > plate) {
+        ring = plate;
+    }
+    int pr, pg, pb, ir, ig, ib;
+    slot_rgb(SLOT_PAPER, &pr, &pg, &pb);
+    slot_rgb(SLOT_INK, &ir, &ig, &ib);
+    int64_t plate2 = (int64_t)plate * (int64_t)plate;
+    int64_t hole2 = (int64_t)hole * (int64_t)hole;
+    int64_t root2 = (int64_t)root * (int64_t)root;
+    int64_t tip2 = (int64_t)tip * (int64_t)tip;
+    int64_t ring2 = (int64_t)ring * (int64_t)ring;
+    for (int row = 0; row < side; row++) {
+        if (y > 0 && row > INT_MAX - y) {
+            break;
+        }
+        int yy = y + row;
+        if (yy < 0 || yy >= height) {
+            continue;
+        }
+        for (int col = 0; col < side; col++) {
+            if (x > 0 && col > INT_MAX - x) {
+                break;
+            }
+            int xx = x + col;
+            if (xx < 0 || xx >= width) {
+                continue;
+            }
+            int64_t dx64 = (int64_t)xx - (int64_t)cx;
+            int64_t dy64 = (int64_t)yy - (int64_t)cy;
+            if (dx64 > INT_MAX || dx64 < INT_MIN || dy64 > INT_MAX || dy64 < INT_MIN) {
+                continue;
+            }
+            int dx = (int)dx64;
+            int dy = (int)dy64;
+            int64_t d2 = dx64 * dx64 + dy64 * dy64;
+            if (d2 > plate2) {
+                continue;
+            }
+            int ink = 0;
+            if (d2 >= ring2) {
+                ink = 1;
+            } else if (d2 > hole2 && d2 <= root2) {
+                ink = 1;
+            } else if (d2 > root2 && d2 <= tip2 && gear_tooth(dx, dy)) {
+                ink = 1;
+            }
+            uint8_t *p = px + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
+            if (ink) {
+                p[0] = (uint8_t)ir;
+                p[1] = (uint8_t)ig;
+                p[2] = (uint8_t)ib;
+            } else {
+                p[0] = (uint8_t)pr;
+                p[1] = (uint8_t)pg;
+                p[2] = (uint8_t)pb;
+            }
+            p[3] = 255;
         }
     }
 }

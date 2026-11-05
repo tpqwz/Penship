@@ -181,6 +181,126 @@ static int edit(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
     return 0;
 }
 
+/* shortcut: a marker longer than 64 bytes stays a plain newline. Ordered numbers are
+   decimal, at most 9 digits, and the next line is one higher. */
+enum { MARK_MAX = 64 };
+
+static int append_mark(char *out, size_t cap, size_t *n, const char *src, size_t sn) {
+    if (src == NULL || sn > cap || *n > cap - sn) {
+        return -1;
+    }
+    if (sn > 0) {
+        memcpy(out + *n, src, sn);
+    }
+    *n += sn;
+    return 0;
+}
+
+static int format_number(char *dst, size_t cap, uint32_t value) {
+    char tmp[10];
+    int n = 0;
+    uint32_t v = value;
+    do {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v > 0 && n < 10);
+    if ((size_t)n + 2 > cap) {
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        dst[i] = tmp[n - 1 - i];
+    }
+    dst[n] = '.';
+    dst[n + 1] = ' ';
+    return n + 2;
+}
+
+/* Length of the marker for the next line. 0 means this line has no list or quote.
+   -1 means the marker does not fit. *old_len is the marker on this line. */
+static int next_marker(const char *s, size_t n, char *out, size_t cap, size_t *old_len) {
+    size_t i = 0;
+    while (i < n && i < 24 && s[i] == ' ') {
+        i++;
+    }
+    size_t quote = i;
+    while (quote < n && s[quote] == '>') {
+        quote++;
+    }
+    int has_quote = quote > i;
+    if (has_quote && quote < n && s[quote] == ' ') {
+        quote++;
+    }
+    size_t list = quote;
+    int kind = 0;
+    char bullet = 0;
+    uint32_t num = 0;
+    size_t end = list;
+    if (list < n && (s[list] == '-' || s[list] == '+' || s[list] == '*') && list + 1 < n && s[list + 1] == ' ') {
+        bullet = s[list];
+        kind = 1;
+        end = list + 2;
+        if (end + 3 < n && s[end] == '[' && (s[end + 1] == ' ' || s[end + 1] == 'x' || s[end + 1] == 'X') &&
+            s[end + 2] == ']' && s[end + 3] == ' ') {
+            kind = 2;
+            end += 4;
+        }
+    } else {
+        size_t d = list;
+        int digits = 0;
+        while (d < n && digits < 9 && s[d] >= '0' && s[d] <= '9') {
+            uint32_t dig = (uint32_t)(s[d] - '0');
+            if (num > (UINT32_MAX - dig) / 10u) {
+                return 0;
+            }
+            num = num * 10u + dig;
+            digits++;
+            d++;
+        }
+        if (digits > 0 && d + 1 < n && s[d] == '.' && s[d + 1] == ' ') {
+            kind = 3;
+            end = d + 2;
+        }
+    }
+    if (!has_quote && kind == 0) {
+        return 0;
+    }
+    if (end > MARK_MAX) {
+        return -1;
+    }
+    *old_len = end;
+    size_t w = 0;
+    if (append_mark(out, cap, &w, s, quote) != 0) {
+        return -1;
+    }
+    if (kind == 1) {
+        char m[2];
+        m[0] = bullet;
+        m[1] = ' ';
+        if (append_mark(out, cap, &w, m, 2) != 0) {
+            return -1;
+        }
+    } else if (kind == 2) {
+        char m[6];
+        m[0] = bullet;
+        m[1] = ' ';
+        m[2] = '[';
+        m[3] = ' ';
+        m[4] = ']';
+        m[5] = ' ';
+        if (append_mark(out, cap, &w, m, 6) != 0) {
+            return -1;
+        }
+    } else if (kind == 3) {
+        uint32_t next = num < 999999999u ? num + 1u : num;
+        char tmp[12];
+        int tn = format_number(tmp, sizeof tmp, next);
+        if (tn < 0 || append_mark(out, cap, &w, tmp, (size_t)tn) != 0) {
+            return -1;
+        }
+    }
+    return (int)w;
+}
+
 int doc_insert(Doc *doc, const char *utf8, size_t n) {
     if (n == 0) {
         return 0;
@@ -188,6 +308,28 @@ int doc_insert(Doc *doc, const char *utf8, size_t n) {
     size_t lo = 0;
     size_t hi = 0;
     sel_bounds(doc, &lo, &hi);
+    if (n == 1 && utf8 != NULL && utf8[0] == '\n' && lo == hi) {
+        size_t start = doc->caret;
+        while (start > 0 && doc->bytes[start - 1] != '\n') {
+            start--;
+        }
+        size_t line_end = doc->caret;
+        while (line_end < doc->len && doc->bytes[line_end] != '\n') {
+            line_end++;
+        }
+        char marker[MARK_MAX];
+        size_t old_len = 0;
+        int nw = next_marker(doc->bytes + start, line_end - start, marker, sizeof marker, &old_len);
+        if (nw > 0 && doc->caret >= start && doc->caret - start >= old_len && (size_t)nw <= sizeof marker) {
+            if (doc->caret == line_end && doc->caret - start == old_len) {
+                return edit(doc, start, old_len, NULL, 0);
+            }
+            char buf[1 + MARK_MAX];
+            buf[0] = '\n';
+            memcpy(buf + 1, marker, (size_t)nw);
+            return edit(doc, doc->caret, 0, buf, (size_t)nw + 1);
+        }
+    }
     return edit(doc, lo, hi - lo, utf8, n);
 }
 

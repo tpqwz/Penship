@@ -9,7 +9,9 @@ enum {
     CHROME_FOCUS = 4,
     CHROME_THEME = 5,
     CHROME_SOURCE = 6,
-    CHROME_COUNT = 7
+    CHROME_SETTINGS = 7,
+    CHROME_DONE = 8,
+    CHROME_COUNT = 9
 };
 
 struct Chrome {
@@ -21,8 +23,10 @@ struct Chrome {
     int h[CHROME_COUNT];
 };
 
-/* Place the same controls. A wide window uses a side column. A narrow window uses rows of three at the bottom, above the inset. */
-void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density);
+/* Place the writing surface, or the settings view when settings is non-zero.
+   The writing surface keeps a small gear at the end. The settings view has the options and Done. */
+void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density,
+                  int settings);
 
 /* Index of the control under the point, or -1. */
 int chrome_hit(const struct Chrome *chrome, int x, int y);

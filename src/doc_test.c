@@ -150,6 +150,64 @@ static void test_table_tab(void) {
     doc_free(doc);
 }
 
+static void test_newline_continues_marker(void) {
+    Doc *doc = doc_new();
+    expect(doc_insert(doc, "- milk", 6) == 0, "a bullet");
+    expect(doc_insert(doc, "\n", 1) == 0, "enter continues the bullet");
+    expect(strcmp(doc_text(doc, NULL), "- milk\n- ") == 0 && doc_caret(doc) == 9, "the next bullet is ready");
+    expect(doc_insert(doc, "\n", 1) == 0, "enter on an empty bullet leaves the list");
+    expect(strcmp(doc_text(doc, NULL), "- milk\n") == 0 && doc_caret(doc) == 7, "the empty marker is gone");
+    expect(doc_undo(doc) == 0, "undo leaving the list");
+    expect(strcmp(doc_text(doc, NULL), "- milk\n- ") == 0, "the bullet marker returns");
+
+    expect(doc_load_bytes(doc, "1. figs", 7) == 0, "an ordered item");
+    doc_place(doc, 7);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter continues the number");
+    expect(strcmp(doc_text(doc, NULL), "1. figs\n2. ") == 0, "the next number is one higher");
+
+    expect(doc_load_bytes(doc, "- [x] eggs", 10) == 0, "a checked task");
+    doc_place(doc, 10);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter continues the task");
+    expect(strcmp(doc_text(doc, NULL), "- [x] eggs\n- [ ] ") == 0, "the new box is open");
+
+    expect(doc_load_bytes(doc, "> note", 6) == 0, "a quote");
+    doc_place(doc, 6);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter continues the quote");
+    expect(strcmp(doc_text(doc, NULL), "> note\n> ") == 0, "the quote mark continues");
+
+    expect(doc_load_bytes(doc, "    - nest", 10) == 0, "a nested bullet");
+    doc_place(doc, 10);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter keeps the indent");
+    expect(strcmp(doc_text(doc, NULL), "    - nest\n    - ") == 0, "four spaces stay");
+
+    expect(doc_load_bytes(doc, "> - milk", 8) == 0, "a quote and a bullet");
+    doc_place(doc, 8);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter continues both marks");
+    expect(strcmp(doc_text(doc, NULL), "> - milk\n> - ") == 0, "quote and bullet both stay");
+
+    expect(doc_load_bytes(doc, "- helXlo", 8) == 0, "a bullet to split");
+    doc_place(doc, 5);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter in the words splits the item");
+    expect(strcmp(doc_text(doc, NULL), "- hel\n- Xlo") == 0, "each piece keeps a bullet");
+
+    expect(doc_load_bytes(doc, "- milk", 6) == 0, "a bullet whose marker is edited");
+    doc_place(doc, 1);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter inside the marker is a plain newline");
+    expect(strcmp(doc_text(doc, NULL), "-\n milk") == 0, "the marker was not repeated");
+
+    expect(doc_load_bytes(doc, "plain", 5) == 0, "prose");
+    doc_place(doc, 5);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter on prose is a newline");
+    expect(strcmp(doc_text(doc, NULL), "plain\n") == 0 && doc_caret(doc) == 6, "no marker was invented");
+
+    expect(doc_load_bytes(doc, "- abcd", 6) == 0, "a bullet with a selection");
+    doc_place(doc, 4);
+    doc_extend(doc, 2);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter replaces the selection");
+    expect(strcmp(doc_text(doc, NULL), "- ab\n") == 0, "a selection does not continue the marker");
+    doc_free(doc);
+}
+
 static void test_rows(void) {
     Doc *doc = doc_new();
     expect(doc_insert(doc, "ab\ncd", 5) == 0, "two lines");
@@ -287,6 +345,7 @@ int main(void) {
     test_place();
     test_task();
     test_table_tab();
+    test_newline_continues_marker();
     test_rows();
     test_load_bytes();
     test_selection_and_undo();

@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 static const char *k_labels[CHROME_COUNT] = {"Smaller", "Larger", "Font", "Typewriter", "Focus", "Theme",
-                                             "Source"};
+                                             "Source", "Settings", "Done"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -58,7 +58,30 @@ static int thumb_px(int density) {
     return thumb;
 }
 
-void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density) {
+static void hide_controls(struct Chrome *chrome) {
+    for (int i = 0; i < CHROME_COUNT; i++) {
+        chrome->x[i] = 0;
+        chrome->y[i] = 0;
+        chrome->w[i] = 0;
+        chrome->h[i] = 0;
+    }
+}
+
+static void place_one(struct Chrome *chrome, int index, int x, int y, int w, int h) {
+    if (w < 1) {
+        w = 1;
+    }
+    if (h < 1) {
+        h = 1;
+    }
+    chrome->x[index] = x;
+    chrome->y[index] = y;
+    chrome->w[index] = w;
+    chrome->h[index] = h;
+}
+
+void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density,
+                  int settings) {
     if (width < 1) {
         width = 1;
     }
@@ -77,87 +100,62 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
     if (inset_bottom > height - inset_top) {
         inset_bottom = height - inset_top;
     }
+    hide_controls(chrome);
+    chrome->vertical = 0;
     int thumb = thumb_px(density);
-    int vertical = width >= height && width >= thumb * 8;
-    chrome->vertical = vertical;
-    if (vertical) {
-        int label_px = text_px(density, 0);
-        int col_w = label_px * 8;
-        if (col_w < thumb * 2) {
-            col_w = thumb * 2;
-        }
-        if (col_w > width / 3) {
-            col_w = width / 3;
-        }
-        if (col_w < 1) {
-            col_w = 1;
-        }
-        int inner = height - inset_top - inset_bottom;
-        if (inner < 1) {
-            inner = 1;
-        }
-        int item_h = inner / CHROME_COUNT;
+    int inner = height - inset_top - inset_bottom;
+    if (inner < 1) {
+        inner = 1;
+    }
+    if (settings) {
+        static const int k_rows[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT, CHROME_TYPEWRITER,
+                                    CHROME_FOCUS,    CHROME_THEME,  CHROME_SOURCE, CHROME_DONE};
+        int n = (int)(sizeof k_rows / sizeof k_rows[0]);
+        int item_h = inner / n;
         if (item_h < 1) {
             item_h = 1;
         }
-        for (int i = 0; i < CHROME_COUNT; i++) {
-            chrome->x[i] = 0;
-            chrome->y[i] = inset_top + i * item_h;
-            chrome->w[i] = col_w;
-            chrome->h[i] = item_h;
+        for (int i = 0; i < n; i++) {
+            int h = (i == n - 1) ? inner - item_h * (n - 1) : item_h;
+            if (h < 1) {
+                h = 1;
+            }
+            place_one(chrome, k_rows[i], 0, inset_top + i * item_h, width, h);
         }
-        chrome->text_x = col_w;
-        chrome->text_y = inset_top;
-        chrome->text_w = width - col_w;
-        if (chrome->text_w < 1) {
-            chrome->text_w = 1;
-        }
-        chrome->text_h = inner;
+        chrome->text_x = 0;
+        chrome->text_y = 0;
+        chrome->text_w = 1;
+        chrome->text_h = 1;
         return;
     }
-    /* A floating keyboard toolbar sits on the bottom start. Keep the words clear of it. */
-    int gutter = density * 88 / 160;
-    if (gutter < 0) {
-        gutter = 0;
+    /* The gear floats at the end, under the status inset. The keyboard covers the bottom. */
+    int side = thumb;
+    if (side > width) {
+        side = width;
     }
-    if (gutter > width / 3) {
-        gutter = width / 3;
+    if (side > inner) {
+        side = inner;
     }
-    int cols = 3;
-    int rows = (CHROME_COUNT + cols - 1) / cols;
-    int item_w = (width - gutter) / cols;
-    if (item_w < 1) {
-        item_w = 1;
+    if (side < 1) {
+        side = 1;
     }
-    int item_h = thumb;
-    int bar_h = item_h * rows;
-    int y0 = height - inset_bottom - bar_h;
-    if (y0 < inset_top) {
-        y0 = inset_top;
-        int room = height - inset_bottom - y0;
-        if (room < rows) {
-            room = rows;
-        }
-        item_h = room / rows;
-        if (item_h < 1) {
-            item_h = 1;
-        }
-        bar_h = item_h * rows;
+    int gap = side / 5;
+    int x = width - side - gap;
+    if (x < 0) {
+        x = 0;
     }
-    for (int i = 0; i < CHROME_COUNT; i++) {
-        int col = i % cols;
-        chrome->x[i] = gutter + col * item_w;
-        chrome->y[i] = y0 + (i / cols) * item_h;
-        chrome->w[i] = (col == cols - 1) ? width - gutter - (cols - 1) * item_w : item_w;
-        chrome->h[i] = item_h;
+    int y = inset_top + gap;
+    if (y + side > height - inset_bottom && inset_top <= height - inset_bottom - side) {
+        y = height - inset_bottom - side;
     }
+    if (y < inset_top) {
+        y = inset_top;
+    }
+    place_one(chrome, CHROME_SETTINGS, x, y, side, side);
     chrome->text_x = 0;
     chrome->text_y = inset_top;
     chrome->text_w = width;
-    chrome->text_h = y0 - inset_top;
-    if (chrome->text_h < 1) {
-        chrome->text_h = 1;
-    }
+    chrome->text_h = inner;
 }
 
 int chrome_hit(const struct Chrome *chrome, int x, int y) {
@@ -165,6 +163,9 @@ int chrome_hit(const struct Chrome *chrome, int x, int y) {
         return -1;
     }
     for (int i = 0; i < CHROME_COUNT; i++) {
+        if (chrome->w[i] <= 0 || chrome->h[i] <= 0) {
+            continue;
+        }
         if (x >= chrome->x[i] && y >= chrome->y[i] && x < chrome->x[i] + chrome->w[i] &&
             y < chrome->y[i] + chrome->h[i]) {
             return i;
