@@ -542,6 +542,454 @@ int doc_insert(Doc *doc, const char *utf8, size_t n) {
     return edit(doc, lo, hi - lo, utf8, n);
 }
 
+/* 1 when s[at, at+n) is mark and the same mark character does not continue past it. */
+static int mark_at(const char *s, size_t len, size_t at, const char *mark, size_t n) {
+    if (n == 0 || at > len || n > len - at) {
+        return 0;
+    }
+    if (memcmp(s + at, mark, n) != 0) {
+        return 0;
+    }
+    unsigned char edge = (unsigned char)mark[0];
+    int uniform = 1;
+    for (size_t i = 1; i < n; i++) {
+        if ((unsigned char)mark[i] != edge) {
+            uniform = 0;
+        }
+    }
+    if (!uniform) {
+        return 1;
+    }
+    if (at > 0 && (unsigned char)s[at - 1] == edge) {
+        return 0;
+    }
+    if (at + n < len && (unsigned char)s[at + n] == edge) {
+        return 0;
+    }
+    return 1;
+}
+
+static int replace_span(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
+    char *copy = NULL;
+    if (n > 0) {
+        copy = malloc(n);
+        if (copy == NULL) {
+            return -1;
+        }
+        memcpy(copy, in, n);
+    }
+    int rc = edit(doc, at, cut, copy, n);
+    free(copy);
+    return rc;
+}
+
+int doc_mark(Doc *doc, const char *mark, size_t n) {
+    if (doc == NULL || doc->bytes == NULL || mark == NULL || n == 0 || n > 8) {
+        return -1;
+    }
+    if (!utf8_valid(mark, n)) {
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (mark[i] == '\n') {
+            return -1;
+        }
+    }
+    size_t lo = 0;
+    size_t hi = 0;
+    sel_bounds(doc, &lo, &hi);
+    size_t len = doc->len;
+    if (hi < lo || hi > len) {
+        return -1;
+    }
+    if (hi > lo && hi - lo >= n * 2 && mark_at(doc->bytes, len, lo, mark, n) &&
+        mark_at(doc->bytes, len, hi - n, mark, n)) {
+        return replace_span(doc, lo, hi - lo, doc->bytes + lo + n, hi - lo - n * 2);
+    }
+    if (n <= len && lo >= n && hi <= len - n && mark_at(doc->bytes, len, lo - n, mark, n) &&
+        mark_at(doc->bytes, len, hi, mark, n)) {
+        return replace_span(doc, lo - n, hi - lo + n * 2, doc->bytes + lo, hi - lo);
+    }
+    if (n > SIZE_MAX / 2 || hi - lo > SIZE_MAX - n * 2) {
+        return -1;
+    }
+    size_t sel = hi - lo;
+    size_t out_n = sel + n * 2;
+    char *buf = malloc(out_n > 0 ? out_n : 1);
+    if (buf == NULL) {
+        return -1;
+    }
+    memcpy(buf, mark, n);
+    if (sel > 0) {
+        memcpy(buf + n, doc->bytes + lo, sel);
+    }
+    memcpy(buf + n + sel, mark, n);
+    int rc = edit(doc, lo, sel, buf, out_n);
+    free(buf);
+    if (rc == 0 && sel == 0) {
+        doc->caret = lo + n;
+        doc->anchor = doc->caret;
+    }
+    return rc;
+}
+
+static int buf_add(char *out, size_t cap, size_t *n, const char *src, size_t sn) {
+    if (out == NULL || n == NULL || *n > cap || sn > cap - *n) {
+        return -1;
+    }
+    if (sn > 0) {
+        if (src == NULL) {
+            return -1;
+        }
+        memcpy(out + *n, src, sn);
+    }
+    *n += sn;
+    return 0;
+}
+
+static size_t line_begin(const char *s, size_t at) {
+    while (at > 0 && s[at - 1] != '\n') {
+        at--;
+    }
+    return at;
+}
+
+static size_t line_finish(const char *s, size_t len, size_t at) {
+    while (at < len && s[at] != '\n') {
+        at++;
+    }
+    return at;
+}
+
+static int task_len(const char *s, size_t n) {
+    if (n >= 6 && s[0] == '-' && s[1] == ' ' && s[2] == '[' && (s[3] == ' ' || s[3] == 'x' || s[3] == 'X') &&
+        s[4] == ']' && s[5] == ' ') {
+        return 6;
+    }
+    return 0;
+}
+
+static int bullet_len(const char *s, size_t n) {
+    if (n >= 2 && (s[0] == '-' || s[0] == '*' || s[0] == '+') && s[1] == ' ') {
+        return 2;
+    }
+    return 0;
+}
+
+static int quote_len(const char *s, size_t n) {
+    if (n >= 1 && s[0] == '>') {
+        if (n >= 2 && s[1] == ' ') {
+            return 2;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int rewrite_line(const char *s, size_t n, int kind, char *out, size_t cap, size_t *wrote) {
+    size_t ind = 0;
+    while (ind < n && ind < 3 && s[ind] == ' ') {
+        ind++;
+    }
+    size_t w = 0;
+    if (buf_add(out, cap, &w, s, ind) != 0) {
+        return -1;
+    }
+    const char *body = s + ind;
+    size_t bn = n - ind;
+    if (kind == 1) {
+        int hashes = 0;
+        size_t h = 0;
+        while (h < bn && body[h] == '#' && hashes < 6) {
+            hashes++;
+            h++;
+        }
+        int head = hashes > 0 && (h == bn || body[h] == ' ' || body[h] == '\t');
+        if (!head) {
+            if (buf_add(out, cap, &w, "# ", 2) != 0 || buf_add(out, cap, &w, body, bn) != 0) {
+                return -1;
+            }
+        } else if (hashes < 3) {
+            char marks[4];
+            for (int i = 0; i < hashes + 1; i++) {
+                marks[i] = '#';
+            }
+            marks[hashes + 1] = ' ';
+            if (h < bn && (body[h] == ' ' || body[h] == '\t')) {
+                h++;
+            }
+            if (buf_add(out, cap, &w, marks, (size_t)hashes + 2) != 0 || buf_add(out, cap, &w, body + h, bn - h) != 0) {
+                return -1;
+            }
+        } else {
+            if (h < bn && (body[h] == ' ' || body[h] == '\t')) {
+                h++;
+            }
+            if (buf_add(out, cap, &w, body + h, bn - h) != 0) {
+                return -1;
+            }
+        }
+    } else if (kind == 2) {
+        int took = bullet_len(body, bn);
+        if (took > 0) {
+            if (buf_add(out, cap, &w, body + took, bn - (size_t)took) != 0) {
+                return -1;
+            }
+        } else if (buf_add(out, cap, &w, "- ", 2) != 0 || buf_add(out, cap, &w, body, bn) != 0) {
+            return -1;
+        }
+    } else if (kind == 3) {
+        int took = task_len(body, bn);
+        int bullet = bullet_len(body, bn);
+        if (took > 0) {
+            if (buf_add(out, cap, &w, body + took, bn - (size_t)took) != 0) {
+                return -1;
+            }
+        } else if (bullet > 0) {
+            if (buf_add(out, cap, &w, "- [ ] ", 6) != 0 || buf_add(out, cap, &w, body + bullet, bn - (size_t)bullet) != 0) {
+                return -1;
+            }
+        } else if (buf_add(out, cap, &w, "- [ ] ", 6) != 0 || buf_add(out, cap, &w, body, bn) != 0) {
+            return -1;
+        }
+    } else if (kind == 4) {
+        int took = quote_len(body, bn);
+        if (took > 0) {
+            if (buf_add(out, cap, &w, body + took, bn - (size_t)took) != 0) {
+                return -1;
+            }
+        } else if (buf_add(out, cap, &w, "> ", 2) != 0 || buf_add(out, cap, &w, body, bn) != 0) {
+            return -1;
+        }
+    } else {
+        return -1;
+    }
+    *wrote = w;
+    return 0;
+}
+
+int doc_line(Doc *doc, int kind) {
+    if (doc == NULL || doc->bytes == NULL || kind < 1 || kind > 4) {
+        return -1;
+    }
+    size_t lo = 0;
+    size_t hi = 0;
+    sel_bounds(doc, &lo, &hi);
+    if (hi < lo || hi > doc->len) {
+        return -1;
+    }
+    size_t start = line_begin(doc->bytes, lo);
+    size_t end_at = hi > start ? hi - 1 : hi;
+    if (end_at > doc->len) {
+        end_at = doc->len;
+    }
+    size_t end = line_finish(doc->bytes, doc->len, end_at);
+    if (end < start || end - start > DOC_MAX_BYTES) {
+        return -1;
+    }
+    size_t lines = 1;
+    for (size_t k = start; k < end; k++) {
+        if (doc->bytes[k] == '\n') {
+            if (lines == SIZE_MAX) {
+                return -1;
+            }
+            lines++;
+        }
+    }
+    if (lines > SIZE_MAX / 8) {
+        return -1;
+    }
+    size_t span = end - start;
+    if (span > SIZE_MAX - lines * 8) {
+        return -1;
+    }
+    size_t cap = span + lines * 8;
+    if (cap > DOC_MAX_BYTES) {
+        return -1;
+    }
+    char *buf = malloc(cap > 0 ? cap : 1);
+    if (buf == NULL) {
+        return -1;
+    }
+    size_t w = 0;
+    size_t p = start;
+    int rc = 0;
+    while (p < end || (p == start && p == end)) {
+        size_t e = p;
+        while (e < end && doc->bytes[e] != '\n') {
+            e++;
+        }
+        size_t piece = 0;
+        if (rewrite_line(doc->bytes + p, e - p, kind, buf + w, cap - w, &piece) != 0) {
+            rc = -1;
+            break;
+        }
+        w += piece;
+        if (e < end && doc->bytes[e] == '\n') {
+            if (buf_add(buf, cap, &w, "\n", 1) != 0) {
+                rc = -1;
+                break;
+            }
+            p = e + 1;
+            if (p == end) {
+                break;
+            }
+        } else {
+            break;
+        }
+        if (p == start && p == end) {
+            break;
+        }
+    }
+    if (rc == 0) {
+        rc = edit(doc, start, end - start, buf, w);
+    }
+    free(buf);
+    return rc;
+}
+
+int doc_link(Doc *doc) {
+    if (doc == NULL || doc->bytes == NULL) {
+        return -1;
+    }
+    size_t lo = 0;
+    size_t hi = 0;
+    sel_bounds(doc, &lo, &hi);
+    if (hi < lo || hi > doc->len || hi - lo > DOC_MAX_BYTES - 4) {
+        return -1;
+    }
+    size_t sel = hi - lo;
+    size_t n = sel + 4;
+    char *buf = malloc(n);
+    if (buf == NULL) {
+        return -1;
+    }
+    buf[0] = '[';
+    if (sel > 0) {
+        memcpy(buf + 1, doc->bytes + lo, sel);
+    }
+    buf[1 + sel] = ']';
+    buf[2 + sel] = '(';
+    buf[3 + sel] = ')';
+    int rc = edit(doc, lo, sel, buf, n);
+    free(buf);
+    if (rc == 0) {
+        doc->caret = sel == 0 ? lo + 1 : lo + sel + 3;
+        doc->anchor = doc->caret;
+    }
+    return rc;
+}
+
+int doc_block(Doc *doc, int kind) {
+    if (doc == NULL || doc->bytes == NULL || kind < 1 || kind > 3) {
+        return -1;
+    }
+    size_t lo = 0;
+    size_t hi = 0;
+    sel_bounds(doc, &lo, &hi);
+    if (hi < lo || hi > doc->len) {
+        return -1;
+    }
+    const char *body = "---\n";
+    size_t body_n = 4;
+    size_t place = 4;
+    if (kind == 2) {
+        body = "|  |  |\n| --- | --- |\n|  |  |\n";
+        body_n = 30;
+        place = 2;
+    } else if (kind == 3) {
+        body = "```\n\n```\n";
+        body_n = 9;
+        place = 4;
+    }
+    int lead = lo == hi && lo > 0 && doc->bytes[lo - 1] != '\n';
+    if (body_n > 96 || (size_t)lead + body_n > 96) {
+        return -1;
+    }
+    char buf[96];
+    size_t w = 0;
+    if (lead) {
+        buf[w++] = '\n';
+    }
+    memcpy(buf + w, body, body_n);
+    w += body_n;
+    int rc = edit(doc, lo, hi - lo, buf, w);
+    if (rc == 0) {
+        size_t at = lo + (size_t)lead + place;
+        if (at > lo + w) {
+            at = lo + w;
+        }
+        doc->caret = at;
+        doc->anchor = at;
+    }
+    return rc;
+}
+
+static int word_cp(unsigned cp) {
+    return cp != ' ' && cp != '\t' && cp != '\n' && cp != '\r';
+}
+
+int doc_word_at(const char *text, size_t len, size_t byte_off, size_t *lo, size_t *hi) {
+    if (lo == NULL || hi == NULL) {
+        return -1;
+    }
+    if (text == NULL) {
+        text = "";
+        len = 0;
+    }
+    if (byte_off > len) {
+        byte_off = len;
+    }
+    while (byte_off > 0 && byte_off < len && ((unsigned char)text[byte_off] & 0xc0) == 0x80) {
+        byte_off--;
+    }
+    size_t here = byte_off;
+    unsigned cp = 0;
+    int n = byte_off < len ? utf8_decode(text + byte_off, len - byte_off, &cp) : -1;
+    if (n < 1 || !word_cp(cp)) {
+        if (byte_off == 0) {
+            return -1;
+        }
+        size_t p = byte_off;
+        do {
+            p--;
+        } while (p > 0 && ((unsigned char)text[p] & 0xc0) == 0x80);
+        n = utf8_decode(text + p, len - p, &cp);
+        if (n < 1 || !word_cp(cp)) {
+            return -1;
+        }
+        here = p;
+    }
+    size_t start = here;
+    while (start > 0) {
+        size_t p = start;
+        do {
+            p--;
+        } while (p > 0 && ((unsigned char)text[p] & 0xc0) == 0x80);
+        unsigned prev = 0;
+        int pn = utf8_decode(text + p, len - p, &prev);
+        if (pn < 1 || !word_cp(prev)) {
+            break;
+        }
+        start = p;
+    }
+    size_t end = here;
+    while (end < len) {
+        unsigned cur = 0;
+        int cn = utf8_decode(text + end, len - end, &cur);
+        if (cn < 1 || !word_cp(cur)) {
+            break;
+        }
+        end += (size_t)cn;
+    }
+    if (end <= start) {
+        return -1;
+    }
+    *lo = start;
+    *hi = end;
+    return 0;
+}
+
 int doc_backspace(Doc *doc) {
     size_t lo = 0;
     size_t hi = 0;

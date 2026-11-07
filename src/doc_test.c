@@ -363,6 +363,83 @@ static void test_rope(void) {
     free(block);
 }
 
+static void test_mark(void) {
+    Doc *doc = doc_new();
+    expect(doc != NULL, "mark doc");
+    if (doc == NULL) {
+        return;
+    }
+    expect(doc_mark(NULL, "**", 2) == -1, "a null document is refused");
+    expect(doc_mark(doc, NULL, 2) == -1, "a null mark is refused");
+    expect(doc_mark(doc, "**\n", 3) == -1, "a newline mark is refused");
+    expect(doc_insert(doc, "hi", 2) == 0, "seed hi");
+    doc_place(doc, 0);
+    doc_seek(doc, 2);
+    expect(doc_mark(doc, "**", 2) == 0, "bold wraps the selection");
+    expect(strcmp(doc_text(doc, NULL), "**hi**") == 0, "bold marks surround hi");
+    doc_place(doc, 2);
+    doc_seek(doc, 4);
+    expect(doc_mark(doc, "**", 2) == 0, "bold toggles off around the word");
+    expect(strcmp(doc_text(doc, NULL), "hi") == 0, "the bold marks are gone");
+    expect(doc_undo(doc) == 0 && strcmp(doc_text(doc, NULL), "**hi**") == 0, "undo restores the wrap");
+    doc_load_bytes(doc, "**hi**", 6);
+    doc_place(doc, 2);
+    doc_seek(doc, 4);
+    expect(doc_mark(doc, "*", 1) == 0, "italic does not strip a bold wrap");
+    expect(strcmp(doc_text(doc, NULL), "***hi***") == 0, "italic adds a star around bold");
+    doc_load_bytes(doc, "say `hi` please", 15);
+    doc_place(doc, 5);
+    doc_seek(doc, 7);
+    expect(doc_mark(doc, "`", 1) == 0, "code toggles off");
+    expect(strcmp(doc_text(doc, NULL), "say hi please") == 0, "the code ticks are gone");
+    doc_load_bytes(doc, "go", 2);
+    doc_place(doc, 2);
+    expect(doc_mark(doc, "~~", 2) == 0, "an empty selection inserts strike marks");
+    expect(strcmp(doc_text(doc, NULL), "go~~~~") == 0 && doc_caret(doc) == 4, "the caret sits between the marks");
+    doc_free(doc);
+}
+
+static void test_bar_actions(void) {
+    Doc *doc = doc_new();
+    expect(doc != NULL, "bar doc");
+    if (doc == NULL) {
+        return;
+    }
+    expect(doc_insert(doc, "Hello", 5) == 0, "seed Hello");
+    doc_place(doc, 0);
+    expect(doc_line(doc, 1) == 0 && strcmp(doc_text(doc, NULL), "# Hello") == 0, "a heading mark");
+    expect(doc_line(doc, 1) == 0 && strcmp(doc_text(doc, NULL), "## Hello") == 0, "the heading deepens");
+    expect(doc_line(doc, 1) == 0 && strcmp(doc_text(doc, NULL), "### Hello") == 0, "the heading reaches three");
+    expect(doc_line(doc, 1) == 0 && strcmp(doc_text(doc, NULL), "Hello") == 0, "the heading comes off");
+    expect(doc_line(doc, 2) == 0 && strcmp(doc_text(doc, NULL), "- Hello") == 0, "a bullet");
+    expect(doc_line(doc, 3) == 0 && strcmp(doc_text(doc, NULL), "- [ ] Hello") == 0, "a bullet becomes a task");
+    expect(doc_line(doc, 3) == 0 && strcmp(doc_text(doc, NULL), "Hello") == 0, "the task comes off");
+    expect(doc_line(doc, 4) == 0 && strcmp(doc_text(doc, NULL), "> Hello") == 0, "a quote");
+    expect(doc_line(doc, 4) == 0 && strcmp(doc_text(doc, NULL), "Hello") == 0, "the quote comes off");
+    doc_place(doc, 0);
+    doc_seek(doc, 5);
+    expect(doc_link(doc) == 0 && strcmp(doc_text(doc, NULL), "[Hello]()") == 0, "the selection becomes a link");
+    expect(doc_caret(doc) == 8, "the caret waits in the url");
+    doc_load_bytes(doc, "ab", 2);
+    doc_place(doc, 1);
+    expect(doc_block(doc, 1) == 0 && strcmp(doc_text(doc, NULL), "a\n---\nb") == 0, "a rule splits the line");
+    doc_load_bytes(doc, "", 0);
+    expect(doc_block(doc, 3) == 0 && strcmp(doc_text(doc, NULL), "```\n\n```\n") == 0, "a fenced block");
+    expect(doc_caret(doc) == 4, "the caret sits inside the fence");
+    doc_load_bytes(doc, "", 0);
+    expect(doc_block(doc, 2) == 0 && doc_caret(doc) == 2, "a table places the caret in the first cell");
+    expect(doc_line(NULL, 1) == -1 && doc_block(doc, 9) == -1, "a bad block is refused");
+    const char *words = "hello world";
+    size_t wlo = 0;
+    size_t whi = 0;
+    expect(doc_word_at(words, 11, 1, &wlo, &whi) == 0 && wlo == 0 && whi == 5, "hello is the word");
+    expect(doc_word_at(words, 11, 5, &wlo, &whi) == 0 && wlo == 0 && whi == 5, "the gap after hello stays with hello");
+    expect(doc_word_at(words, 11, 6, &wlo, &whi) == 0 && wlo == 6 && whi == 11, "world is the word");
+    expect(doc_word_at("  ", 2, 0, &wlo, &whi) == -1, "spaces are not a word");
+    expect(doc_word_at(NULL, 3, 0, &wlo, &whi) == -1, "a null buffer is not a word");
+    doc_free(doc);
+}
+
 int main(void) {
     test_insert_and_move();
     test_utf8();
@@ -376,6 +453,8 @@ int main(void) {
     test_selection_and_undo();
     test_save_load();
     test_rope();
+    test_mark();
+    test_bar_actions();
     if (fail) {
         return 1;
     }

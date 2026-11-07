@@ -3,8 +3,11 @@
 #include <limits.h>
 #include <stddef.h>
 
-static const char *k_labels[CHROME_COUNT] = {"Open",     "Save",    "Smaller", "Larger", "Font", "Typewriter",
-                                             "Focus",    "Theme",   "Source",  "Menu",   "Done"};
+static const char *k_labels[CHROME_COUNT] = {
+    "Open",   "Save",     "Save as", "Export", "Contents", "Smaller", "Larger", "Font", "Typewriter",
+    "Focus",  "Line",     "Theme",   "Source", "Menu",     "Done",    "Bold",   "Italic", "Strike", "Code",
+    "Link",   "Head",     "List",    "Task",   "Quote",    "Rule",    "Table",  "Block",  "Read only", "Find",
+    "Settings", "Font file", "Glide"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -20,6 +23,29 @@ int text_step_count(void) {
 
 int text_step_default(void) {
     return 4;
+}
+
+static int scaled_px(int density, int step, int scale_milli) {
+    if (scale_milli < 500 || scale_milli > 3000) {
+        scale_milli = 1000;
+    }
+    int px = text_px(density, step);
+    if (px > 0 && scale_milli > INT_MAX / px) {
+        return px;
+    }
+    px = px * scale_milli / 1000;
+    if (px < 8) {
+        px = 8;
+    }
+    return px;
+}
+
+int chrome_label_px(int density, int scale_milli) {
+    return scaled_px(density, text_step_default(), scale_milli);
+}
+
+int chrome_bar_px(int density, int scale_milli) {
+    return scaled_px(density, 2, scale_milli);
 }
 
 int text_px(int density, int step) {
@@ -80,8 +106,44 @@ static void place_one(struct Chrome *chrome, int index, int x, int y, int w, int
     chrome->h[index] = h;
 }
 
+int chrome_row_px(int density, int scale_milli) {
+    int row = thumb_px(density);
+    int label = chrome_label_px(density, scale_milli);
+    int padded = label + label / 2;
+    if (padded > row) {
+        row = padded;
+    }
+    return row;
+}
+
+static void place_column(struct Chrome *chrome, const int *rows, int n, int width, int inset_top, int inner, int thumb,
+                         int row, int *scroll) {
+    int total = row > 0 && n > INT_MAX / row ? INT_MAX : row * n;
+    int max_scroll = total > inner ? total - inner : 0;
+    int at = 0;
+    if (scroll != NULL) {
+        at = *scroll;
+        if (at < 0) {
+            at = 0;
+        }
+        if (at > max_scroll) {
+            at = max_scroll;
+        }
+        *scroll = at;
+    }
+    int span = width;
+    int max_span = thumb * 10;
+    if (max_span > 0 && span > max_span) {
+        span = max_span;
+    }
+    int x0 = (width - span) / 2;
+    for (int i = 0; i < n; i++) {
+        place_one(chrome, rows[i], x0, inset_top + i * row - at, span, row);
+    }
+}
+
 void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density,
-                  int settings) {
+                  int screen, int scale_milli, int *scroll, int *bar_scroll, int editing) {
     if (width < 1) {
         width = 1;
     }
@@ -107,21 +169,17 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
     if (inner < 1) {
         inner = 1;
     }
-    if (settings) {
-        static const int k_rows[] = {CHROME_OPEN,  CHROME_SAVE,     CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,
-                                    CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_THEME,  CHROME_SOURCE, CHROME_DONE};
-        int n = (int)(sizeof k_rows / sizeof k_rows[0]);
-        int item_h = inner / n;
-        if (item_h < 1) {
-            item_h = 1;
-        }
-        for (int i = 0; i < n; i++) {
-            int h = (i == n - 1) ? inner - item_h * (n - 1) : item_h;
-            if (h < 1) {
-                h = 1;
-            }
-            place_one(chrome, k_rows[i], 0, inset_top + i * item_h, width, h);
-        }
+    if (screen == 1 || screen == 2) {
+        static const int k_menu[] = {CHROME_OPEN,   CHROME_SAVE,     CHROME_SAVE_AS, CHROME_EXPORT,
+                                    CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS, CHROME_DONE};
+        static const int k_options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,       CHROME_FONTFILE,
+                                       CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_GLIDE,
+                                       CHROME_THEME,
+                                       CHROME_SOURCE,  CHROME_READONLY, CHROME_DONE};
+        const int *rows = screen == 2 ? k_options : k_menu;
+        int n = screen == 2 ? (int)(sizeof k_options / sizeof k_options[0]) : (int)(sizeof k_menu / sizeof k_menu[0]);
+        int row = chrome_row_px(density, scale_milli);
+        place_column(chrome, rows, n, width, inset_top, inner, thumb, row, scroll);
         chrome->text_x = 0;
         chrome->text_y = 0;
         chrome->text_w = 1;
@@ -152,10 +210,112 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         y = inset_top;
     }
     place_one(chrome, CHROME_SETTINGS, x, y, side, side);
-    chrome->text_x = 0;
+    int text_h = inner;
+    if (editing && width >= 4 && inner > thumb * 2) {
+        int by = height - inset_bottom - thumb;
+        if (by < inset_top) {
+            by = inset_top;
+        }
+        static const int k_bar[] = {CHROME_BOLD,  CHROME_ITALIC, CHROME_STRIKE, CHROME_CODE, CHROME_LINK, CHROME_HEAD,
+                                    CHROME_LIST,  CHROME_TASK,   CHROME_QUOTE,  CHROME_RULE, CHROME_TABLE, CHROME_BLOCK};
+        int nbar = (int)(sizeof k_bar / sizeof k_bar[0]);
+        int col = thumb;
+        if (col > width) {
+            col = width;
+        }
+        if (col < 1) {
+            col = 1;
+        }
+        if (nbar > 0 && col <= INT_MAX / nbar && col * nbar <= width) {
+            int base = width / nbar;
+            int rem = width % nbar;
+            int x = 0;
+            if (bar_scroll != NULL) {
+                *bar_scroll = 0;
+            }
+            for (int i = 0; i < nbar; i++) {
+                int cw = base + (i < rem ? 1 : 0);
+                if (cw < 1) {
+                    cw = 1;
+                }
+                place_one(chrome, k_bar[i], x, by, cw, thumb);
+                x += cw;
+            }
+        } else {
+            int total = col > INT_MAX / nbar ? INT_MAX : col * nbar;
+            int max_scroll = total > width ? total - width : 0;
+            int at = 0;
+            if (bar_scroll != NULL) {
+                at = *bar_scroll;
+                if (at < 0) {
+                    at = 0;
+                }
+                if (at > max_scroll) {
+                    at = max_scroll;
+                }
+                *bar_scroll = at;
+            }
+            for (int i = 0; i < nbar; i++) {
+                place_one(chrome, k_bar[i], i * col - at, by, col, thumb);
+            }
+        }
+        text_h = inner - thumb;
+        if (text_h < 1) {
+            text_h = 1;
+        }
+    }
+    int body = text_px(density, text_step_default());
+    int measure = body > INT_MAX / 30 ? width : body * 30;
+    if (measure > width) {
+        measure = width;
+    }
+    if (measure < 1) {
+        measure = 1;
+    }
+    chrome->text_x = (width - measure) / 2;
     chrome->text_y = inset_top;
-    chrome->text_w = width;
-    chrome->text_h = inner;
+    chrome->text_w = measure;
+    chrome->text_h = text_h;
+}
+
+int chrome_stack(int *ys, int *hs, int n, int top, int bottom, int row_h, int *scroll) {
+    if (ys == NULL || hs == NULL || n < 0 || n > 256) {
+        return -1;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    if (row_h < 1) {
+        row_h = 1;
+    }
+    if (row_h > 4096) {
+        row_h = 4096;
+    }
+    if (bottom < top) {
+        bottom = top;
+    }
+    int inner = bottom - top;
+    if (row_h > 0 && n > INT_MAX / row_h) {
+        return -1;
+    }
+    int total = row_h * n;
+    int max_scroll = total > inner ? total - inner : 0;
+    int at = 0;
+    if (scroll != NULL) {
+        at = *scroll;
+        if (at < 0) {
+            at = 0;
+        }
+        if (at > max_scroll) {
+            at = max_scroll;
+        }
+        *scroll = at;
+    }
+    for (int i = 0; i < n; i++) {
+        ys[i] = top + i * row_h - at;
+        hs[i] = row_h;
+    }
+    return 0;
 }
 
 int chrome_hit(const struct Chrome *chrome, int x, int y) {

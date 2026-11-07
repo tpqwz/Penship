@@ -1,5 +1,6 @@
 #include "chrome.h"
 #include "doc.h"
+#include "html.h"
 #include "ime.h"
 #include "page.h"
 #include "utf8.h"
@@ -58,13 +59,47 @@ struct App {
     char copy_path[1024];
     char last_path[1024];
     char prefs_path[1024];
+    char export_path[1024];
     char open_id[2048];
     int session;
     unsigned char *fonts[3];
     int font_lens[3];
+    unsigned char *custom;
+    int custom_len;
+    char font_path[512];
+    int glide;
+    float glide_v;
+    float glide_carry;
+    float glide_frac;
+    int glide_y[8];
+    int64_t glide_ms[8];
+    int glide_n;
+    int64_t glide_at;
     int face;
     int step;
     int settings;
+    int options;
+    int menu_scroll;
+    int contents;
+    int contents_scroll;
+    int contents_n;
+    int contents_row_h;
+    int bar_scroll;
+    int bar_hit;
+    int sel_menu;
+    int sel_x;
+    int sel_y;
+    int sel_w;
+    int sel_h;
+    int sel_n;
+    int tug;
+    int contents_row_y[PAGE_HEADS_MAX + 2];
+    size_t head_at[PAGE_HEADS_MAX];
+    int head_n;
+    int finding;
+    char query[129];
+    size_t query_n;
+    size_t find_at;
     int compose_n;
     size_t compose_end;
     struct Chrome chrome;
@@ -225,6 +260,76 @@ static int start_gl(struct App *app) {
 }
 
 static void read_insets(struct App *app, int *top, int *bottom);
+static int font_scale_milli(struct App *app);
+static void hide_keyboard(struct App *app);
+static void claim_back(struct App *app);
+
+static void contents_show(struct App *app, uint8_t *px, int width, int height, int top, int bottom, int label_px,
+                          int row_h) {
+    struct PageHead heads[PAGE_HEADS_MAX];
+    char shown[PAGE_HEADS_MAX][PAGE_HEAD_TITLE + 16];
+    const char *labels[PAGE_HEADS_MAX + 2];
+    int ys[PAGE_HEADS_MAX + 2];
+    int hs[PAGE_HEADS_MAX + 2];
+    int xs[PAGE_HEADS_MAX + 2];
+    int ws[PAGE_HEADS_MAX + 2];
+    size_t len = 0;
+    const char *text = app->doc != NULL ? doc_text(app->doc, &len) : "";
+    int nheads = page_heads(text, len, heads, PAGE_HEADS_MAX);
+    if (nheads < 0) {
+        nheads = 0;
+    }
+    if (nheads > PAGE_HEADS_MAX) {
+        nheads = PAGE_HEADS_MAX;
+    }
+    app->head_n = nheads;
+    for (int i = 0; i < nheads; i++) {
+        app->head_at[i] = heads[i].at;
+        int indent = heads[i].level - 1;
+        if (indent < 0) {
+            indent = 0;
+        }
+        if (indent > 5) {
+            indent = 5;
+        }
+        indent *= 2;
+        size_t o = 0;
+        while (indent > 0 && o + 1 < sizeof shown[i]) {
+            shown[i][o] = ' ';
+            o++;
+            indent--;
+        }
+        size_t t = 0;
+        while (t < PAGE_HEAD_TITLE && heads[i].title[t] != '\0' && o + 1 < sizeof shown[i]) {
+            shown[i][o] = heads[i].title[t];
+            o++;
+            t++;
+        }
+        shown[i][o] = '\0';
+        labels[i + 1] = shown[i];
+    }
+    int rows = nheads > 0 ? nheads + 1 : 2;
+    labels[0] = "Menu";
+    if (nheads == 0) {
+        labels[1] = "No headings";
+    }
+    if (row_h < 1) {
+        row_h = 1;
+    }
+    if (chrome_stack(ys, hs, rows, top, bottom, row_h, &app->contents_scroll) != 0) {
+        app->contents_n = 0;
+        app->contents_row_h = row_h;
+        return;
+    }
+    app->contents_n = rows;
+    app->contents_row_h = row_h;
+    for (int i = 0; i < rows; i++) {
+        app->contents_row_y[i] = ys[i];
+        xs[i] = 0;
+        ws[i] = width > 0 ? width : 1;
+    }
+    page_draw_labels(px, width, height, rows, xs, ys, ws, hs, labels, 0, label_px, top, bottom);
+}
 
 static void render(struct App *app) {
     if (!app->ready || app->doc == NULL) {
@@ -256,7 +361,25 @@ static void render(struct App *app) {
         density = AConfiguration_getDensity(app->android->config);
     }
     app->font_px = text_px(density, app->step);
-    chrome_place(&app->chrome, width, height, inset_top, inset_bottom, density, app->settings);
+    int scale = font_scale_milli(app);
+    int label_px = chrome_label_px(density, scale);
+    int screen = app->options ? 2 : (app->settings ? 1 : 0);
+    chrome_place(&app->chrome, width, height, inset_top, inset_bottom, density, screen, scale,
+                 screen != 0 ? &app->menu_scroll : NULL, screen == 0 ? &app->bar_scroll : NULL, page_editing());
+    int find_x = 0;
+    int find_y = 0;
+    int find_w = 0;
+    int find_h = 0;
+    if (app->finding && !app->settings) {
+        find_h = chrome_row_px(density, scale);
+        find_x = app->chrome.text_x;
+        find_y = app->chrome.text_y;
+        find_w = app->chrome.text_w > 0 ? app->chrome.text_w : 1;
+        if (app->chrome.text_h > find_h + 1) {
+            app->chrome.text_y += find_h;
+            app->chrome.text_h -= find_h;
+        }
+    }
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
     /* Count before a settings frame, which paints an empty page and would report zero words. */
@@ -268,15 +391,38 @@ static void render(struct App *app) {
     }
     const char *labels[CHROME_COUNT];
     for (int i = 0; i < CHROME_COUNT; i++) {
-        labels[i] = i == CHROME_SETTINGS ? "" : chrome_label(i);
+        labels[i] = (i == CHROME_SETTINGS || (i >= CHROME_BOLD && i <= CHROME_BLOCK)) ? "" : chrome_label(i);
     }
-    page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
-                     app->chrome.h, labels, app->chrome.vertical, text_px(density, 0));
-    if (app->settings && app->chrome.h[CHROME_OPEN] > 0) {
+    static const char *k_glide_label[] = {"Glide off", "Glide short", "Glide medium", "Glide long", "Glide far"};
+    {
+        int level = page_glide_level();
+        if (level < 0) {
+            level = 0;
+        }
+        if (level > 4) {
+            level = 4;
+        }
+        labels[CHROME_GLIDE] = k_glide_label[level];
+    }
+    int clip_bottom = height - inset_bottom;
+    if (app->settings && app->contents) {
+        contents_show(app, app->pixels, width, height, inset_top, clip_bottom, label_px, chrome_row_px(density, scale));
+    } else {
+        int mark_px = app->settings ? label_px : chrome_bar_px(density, scale);
+        page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
+                         app->chrome.h, labels, app->chrome.vertical, mark_px, inset_top, clip_bottom);
+        for (int tool = CHROME_BOLD; tool <= CHROME_BLOCK; tool++) {
+            if (app->chrome.w[tool] > 0 && app->chrome.h[tool] > 0) {
+                page_draw_tool(app->pixels, width, height, app->chrome.x[tool], app->chrome.y[tool],
+                               app->chrome.w[tool], app->chrome.h[tool], tool - CHROME_BOLD);
+            }
+        }
+    }
+    if (app->settings && !app->contents && app->chrome.h[CHROME_OPEN] > 0) {
         char stat[48];
         snprintf(stat, sizeof stat, words == 1 ? "1 word" : "%d words", words);
         const char *stat_label = stat;
-        int stat_px = text_px(density, 0);
+        int stat_px = label_px;
         int stat_w = stat_px * 8;
         int row_w = app->chrome.w[CHROME_OPEN];
         if (stat_w > row_w / 2) {
@@ -285,10 +431,63 @@ static void render(struct App *app) {
         int stat_x = app->chrome.x[CHROME_OPEN] + row_w - stat_w;
         int stat_y = app->chrome.y[CHROME_OPEN];
         int stat_h = app->chrome.h[CHROME_OPEN];
-        page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px);
+        page_draw_labels(app->pixels, width, height, 1, &stat_x, &stat_y, &stat_w, &stat_h, &stat_label, 0, stat_px,
+                         inset_top, clip_bottom);
+    }
+    if (app->finding && !app->settings && find_h > 0) {
+        const char *shown = app->query_n > 0 ? app->query : "Find";
+        page_draw_labels(app->pixels, width, height, 1, &find_x, &find_y, &find_w, &find_h, &shown, 0, label_px,
+                         inset_top, clip_bottom);
     }
     page_draw_menu(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
                    app->chrome.w[CHROME_SETTINGS]);
+    app->sel_n = 0;
+    if (app->sel_menu && doc_caret(app->doc) != doc_anchor(app->doc)) {
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = 0;
+        int y1 = 0;
+        int sh = 0;
+        if (page_sel_ends(&x0, &y0, &x1, &y1, &sh) == 0) {
+            int row = label_px + label_px / 2;
+            if (row < 48) {
+                row = 48;
+            }
+            int mw = label_px * 5;
+            if (mw < row * 2) {
+                mw = row * 2;
+            }
+            if (mw > width - 16) {
+                mw = width - 16;
+            }
+            int mx = x0;
+            if (mx < 8) {
+                mx = 8;
+            }
+            if (mx > width - mw - 8) {
+                mx = width - mw - 8;
+            }
+            int my = y0 - 8 - row * 3;
+            int bar_top = app->chrome.h[CHROME_BOLD] > 0 ? app->chrome.y[CHROME_BOLD] : height;
+            if (my < inset_top) {
+                my = y0 + sh + 8;
+            }
+            if (my + row * 3 > bar_top && y0 - 8 - row * 3 >= inset_top) {
+                my = y0 - 8 - row * 3;
+            }
+            app->sel_x = mx;
+            app->sel_y = my;
+            app->sel_w = mw;
+            app->sel_h = row;
+            app->sel_n = 3;
+            int xs[3] = {mx, mx, mx};
+            int ys[3] = {my, my + row, my + row * 2};
+            int ws[3] = {mw, mw, mw};
+            int hs[3] = {row, row, row};
+            const char *items[3] = {"Edit", "Copy", "Cut"};
+            page_draw_labels(app->pixels, width, height, 3, xs, ys, ws, hs, items, 0, label_px, inset_top, bar_top);
+        }
+    }
     glViewport(0, 0, width, height);
     glBindTexture(GL_TEXTURE_2D, app->texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, app->pixels);
@@ -312,25 +511,35 @@ static void save_prefs(struct App *app);
 static unsigned char *load_asset(AAssetManager *manager, const char *name, int *len);
 
 static volatile int g_reload;
+static volatile int g_font_pick;
+static volatile int g_redraw;
+static volatile int g_back;
+static int g_keyboard_hold;
 
-static void save_doc(struct App *app) {
+/* 0 when the open file was written. -1 when there is no writable file. */
+static int save_doc(struct App *app) {
     if (app->doc == NULL) {
-        return;
+        return -1;
     }
     if (app->session == SESSION_URI) {
         if (write_uri(app) == 0) {
-            return;
+            return 0;
         }
         /* shortcut: a read-only open saves files/opened.md and is not merged back later. */
         LOGE("save to opened file failed");
         if (app->copy_path[0] != '\0' && doc_save(app->doc, app->copy_path) != 0) {
             LOGE("save copy failed");
         }
-        return;
+        return -1;
     }
-    if (app->session == SESSION_NOTE && app->path[0] != '\0' && doc_save(app->doc, app->path) != 0) {
-        LOGE("save failed");
+    if (app->session == SESSION_NOTE && app->path[0] != '\0') {
+        if (doc_save(app->doc, app->path) != 0) {
+            LOGE("save failed");
+            return -1;
+        }
+        return 0;
     }
+    return -1;
 }
 
 static void save_prefs(struct App *app) {
@@ -349,15 +558,16 @@ static void save_prefs(struct App *app) {
     if (face < 0) {
         face = 0;
     }
-    if (face > 2) {
-        face = 2;
+    if (face > 3) {
+        face = 0;
     }
     FILE *f = fopen(app->prefs_path, "w");
     if (f == NULL) {
         return;
     }
-    if (fprintf(f, "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\ntheme=%d\nsource=%d\n", step, face, page_typewriter(),
-                page_focus(), page_theme(), page_source()) < 0) {
+    if (fprintf(f, "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\nline=%d\nglide=%d\ntheme=%d\nsource=%d\nreadonly=%d\n",
+                step, face, page_typewriter(), page_focus(), page_line(), page_glide_level(), page_theme(),
+                page_source(), page_readonly()) < 0) {
         fclose(f);
         return;
     }
@@ -385,10 +595,16 @@ static void load_prefs(struct App *app) {
             page_set_typewriter(value);
         } else if (sscanf(line, "focus=%d", &value) == 1) {
             page_set_focus(value);
+        } else if (sscanf(line, "line=%d", &value) == 1) {
+            page_set_line(value);
+        } else if (sscanf(line, "glide=%d", &value) == 1) {
+            page_set_glide(value);
         } else if (sscanf(line, "theme=%d", &value) == 1) {
             page_set_theme(value);
         } else if (sscanf(line, "source=%d", &value) == 1) {
             page_set_source(value);
+        } else if (sscanf(line, "readonly=%d", &value) == 1) {
+            page_set_readonly(value);
         }
     }
     fclose(f);
@@ -483,6 +699,10 @@ static jclass load_class(struct App *app, JNIEnv *env, const char *class_name) {
 }
 
 static void show_keyboard(struct App *app) {
+    if (page_readonly() && !app->finding) {
+        return;
+    }
+    g_keyboard_hold = 0;
     JNIEnv *env = jni_env(app);
     if (env == NULL || app->android->activity->clazz == NULL) {
         return;
@@ -498,6 +718,61 @@ static void show_keyboard(struct App *app) {
         jni_ok(env);
     }
     (*env)->DeleteLocalRef(env, keyboard);
+}
+
+static void claim_back(struct App *app) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android == NULL || app->android->activity == NULL || app->android->activity->clazz == NULL) {
+        return;
+    }
+    jclass pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return;
+    }
+    jmethodID claim = (*env)->GetStaticMethodID(env, pen, "claimBack", "(Landroid/app/Activity;)V");
+    if (jni_ok(env) && claim != NULL) {
+        (*env)->CallStaticVoidMethod(env, pen, claim, app->android->activity->clazz);
+        jni_ok(env);
+    }
+    (*env)->DeleteLocalRef(env, pen);
+}
+
+static void hide_keyboard(struct App *app) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android->activity->clazz == NULL) {
+        return;
+    }
+    jclass keyboard = load_class(app, env, "penship.Keyboard");
+    if (keyboard == NULL) {
+        return;
+    }
+    jmethodID hide = (*env)->GetStaticMethodID(env, keyboard, "hide", "(Landroid/app/Activity;)V");
+    if (jni_ok(env) && hide != NULL) {
+        (*env)->CallStaticVoidMethod(env, keyboard, hide, app->android->activity->clazz);
+        jni_ok(env);
+    }
+    (*env)->DeleteLocalRef(env, keyboard);
+}
+
+static int font_scale_milli(struct App *app) {
+    JNIEnv *env = jni_env(app);
+    if (env == NULL || app->android == NULL || app->android->activity == NULL || app->android->activity->clazz == NULL) {
+        return 1000;
+    }
+    jclass keyboard = load_class(app, env, "penship.Keyboard");
+    if (keyboard == NULL) {
+        return 1000;
+    }
+    jmethodID scale = (*env)->GetStaticMethodID(env, keyboard, "fontScaleMilli", "(Landroid/app/Activity;)I");
+    int milli = 1000;
+    if (jni_ok(env) && scale != NULL) {
+        milli = (*env)->CallStaticIntMethod(env, keyboard, scale, app->android->activity->clazz);
+        if (!jni_ok(env) || milli < 500 || milli > 3000) {
+            milli = 1000;
+        }
+    }
+    (*env)->DeleteLocalRef(env, keyboard);
+    return milli;
 }
 
 static void read_insets(struct App *app, int *top, int *bottom) {
@@ -925,6 +1200,9 @@ static int paste_clip(struct App *app) {
     return changed;
 }
 
+static int find_type(struct App *app, const char *bytes, size_t n);
+static void find_pop(struct App *app);
+
 static void apply_ime(struct App *app) {
     if (app->doc == NULL) {
         return;
@@ -936,7 +1214,7 @@ static void apply_ime(struct App *app) {
             app->compose_n = 0;
         } else if (op.kind == IME_UNDO) {
             app->compose_n = 0;
-            if (doc_undo(app->doc) == 0) {
+            if (!page_readonly() && doc_undo(app->doc) == 0) {
                 changed = 1;
             }
         } else if (op.kind == IME_SHORTCUT) {
@@ -959,15 +1237,15 @@ static void apply_ime(struct App *app) {
             copy_selection(app);
         } else if (op.kind == IME_CUT) {
             app->compose_n = 0;
-            if (copy_selection(app) && doc_backspace(app->doc) == 0) {
+            if (!page_readonly() && copy_selection(app) && doc_backspace(app->doc) == 0) {
                 changed = 1;
             }
         } else if (op.kind == IME_PASTE) {
             app->compose_n = 0;
-            if (paste_clip(app)) {
+            if (!page_readonly() && paste_clip(app)) {
                 changed = 1;
             }
-        } else if (op.kind == IME_TAB) {
+        } else if (op.kind == IME_TAB && !page_readonly()) {
             int rc = doc_table_tab(app->doc, op.count);
             if (rc >= 0) {
                 app->compose_n = 0;
@@ -985,7 +1263,7 @@ static void apply_ime(struct App *app) {
             app->compose_n = 0;
             page_set_follow(1);
             render(app);
-        } else if (op.kind == IME_ERASE || op.kind == IME_FORWARD) {
+        } else if ((op.kind == IME_ERASE || op.kind == IME_FORWARD) && !page_readonly()) {
             app->compose_n = 0;
             for (int i = 0; i < op.count; i++) {
                 int rc = op.kind == IME_FORWARD ? doc_delete(app->doc) : doc_backspace(app->doc);
@@ -1008,7 +1286,12 @@ static void apply_ime(struct App *app) {
                 doc_move(app->doc, op.count);
             }
             render(app);
-        } else if (op.kind == IME_TEXT) {
+        } else if (app->finding && op.kind == IME_TEXT) {
+            find_type(app, op.bytes, op.n);
+        } else if (app->finding && (op.kind == IME_ERASE || op.kind == IME_FORWARD)) {
+            app->compose_n = 0;
+            find_pop(app);
+        } else if (op.kind == IME_TEXT && !page_readonly()) {
             if (clear_composition(app)) {
                 changed = 1;
             }
@@ -1030,6 +1313,27 @@ static void apply_ime(struct App *app) {
         doc_text(app->doc, &len);
         LOGI("ime len=%zu caret=%zu", len, doc_caret(app->doc));
     }
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_backPressed(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    g_back = 1;
+    ime_wake();
+}
+
+JNIEXPORT void JNICALL Java_penship_Keyboard_wake(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    g_redraw = 1;
+    ime_wake();
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_fontPicked(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    g_font_pick = 1;
+    ime_wake();
 }
 
 JNIEXPORT void JNICALL Java_penship_Pen_reload(JNIEnv *env, jclass cls, jint adopt) {
@@ -1147,17 +1451,195 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* A held press selects from the finger. The anchor stays while the drag grows. */
+static void select_word(struct App *app, size_t at) {
+    size_t len = 0;
+    const char *text = doc_text(app->doc, &len);
+    size_t lo = 0;
+    size_t hi = 0;
+    if (doc_word_at(text, len, at, &lo, &hi) == 0) {
+        doc_place(app->doc, lo);
+        doc_seek(app->doc, hi);
+    } else {
+        doc_place(app->doc, at);
+        app->sel_menu = 0;
+    }
+}
+
+/* Move one end of the selection. end is 0 for the start and 1 for the finish. */
+static void move_edge(struct App *app, int end, size_t at) {
+    size_t caret = doc_caret(app->doc);
+    size_t anchor = doc_anchor(app->doc);
+    size_t lo = caret < anchor ? caret : anchor;
+    size_t hi = caret < anchor ? anchor : caret;
+    if (end) {
+        if (caret >= anchor) {
+            doc_seek(app->doc, at);
+        } else {
+            doc_place(app->doc, lo);
+            doc_seek(app->doc, at);
+        }
+    } else if (caret <= anchor) {
+        doc_seek(app->doc, at);
+    } else {
+        doc_place(app->doc, hi);
+        doc_seek(app->doc, at);
+    }
+}
+
+static int sel_row(const struct App *app, int x, int y) {
+    if (app->sel_menu == 0 || app->sel_n <= 0 || app->sel_h < 1 || app->sel_w < 1) {
+        return -1;
+    }
+    if (x < app->sel_x || x >= app->sel_x + app->sel_w || y < app->sel_y) {
+        return -1;
+    }
+    int row = (y - app->sel_y) / app->sel_h;
+    if (row < 0 || row >= app->sel_n || y >= app->sel_y + (row + 1) * app->sel_h) {
+        return -1;
+    }
+    return row;
+}
+
+/* A held press selects the word under the finger. A later drag grows that selection. */
 static void arm_select(struct App *app) {
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
     size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h, text, len,
                          doc_caret(app->doc), app->font_px, app->drag_x, app->drag_y);
-    doc_place(app->doc, at);
+    select_word(app, at);
     app->compose_n = 0;
+    app->sel_menu = 0;
     app->drag_mode = 2;
     page_set_follow(0);
     render(app);
+}
+
+enum { FIND_MAX = 128 };
+
+static void find_run(struct App *app, int next) {
+    size_t len = 0;
+    const char *text = doc_text(app->doc, &len);
+    if (text == NULL) {
+        text = "";
+        len = 0;
+    }
+    if (app->query_n > 0) {
+        size_t from = next ? doc_caret(app->doc) : app->find_at;
+        if (from > len) {
+            from = 0;
+        }
+        size_t at = page_find(text, len, app->query, app->query_n, from, 1);
+        if (at < len && app->query_n <= len - at) {
+            doc_place(app->doc, at);
+            doc_seek(app->doc, at + app->query_n);
+            app->find_at = at;
+            page_set_follow(1);
+        }
+    }
+    render(app);
+}
+
+static int find_type(struct App *app, const char *bytes, size_t n) {
+    if (bytes == NULL || n == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (bytes[i] == '\n') {
+            find_run(app, 1);
+            return 1;
+        }
+    }
+    if (!utf8_valid(bytes, n) || n > FIND_MAX || app->query_n > FIND_MAX - n) {
+        return 0;
+    }
+    memcpy(app->query + app->query_n, bytes, n);
+    app->query_n += n;
+    app->query[app->query_n] = '\0';
+    find_run(app, 0);
+    return 1;
+}
+
+static void find_pop(struct App *app) {
+    if (app->query_n == 0) {
+        render(app);
+        return;
+    }
+    size_t i = app->query_n;
+    do {
+        i--;
+    } while (i > 0 && ((unsigned char)app->query[i] & 0xc0) == 0x80);
+    app->query_n = i;
+    app->query[i] = '\0';
+    find_run(app, 0);
+}
+
+/* The selection menu, then Contents, then the options menu, then Find. Back never leaves the activity. */
+static void handle_back(struct App *app) {
+    LOGE("back sel=%d contents=%d menu=%d find=%d", app->sel_menu, app->contents, app->settings, app->finding);
+    if (app->sel_menu) {
+        app->sel_menu = 0;
+        app->sel_n = 0;
+        render(app);
+        return;
+    }
+    if (app->contents) {
+        app->contents = 0;
+        app->contents_scroll = 0;
+        render(app);
+        return;
+    }
+    if (app->options) {
+        app->options = 0;
+        app->menu_scroll = 0;
+        render(app);
+        return;
+    }
+    if (app->settings) {
+        app->settings = 0;
+        app->options = 0;
+        app->contents = 0;
+        render(app);
+        return;
+    }
+    if (app->finding) {
+        app->finding = 0;
+        app->query_n = 0;
+        app->query[0] = '\0';
+        render(app);
+        return;
+    }
+    g_keyboard_hold = 1;
+    hide_keyboard(app);
+}
+
+static void glide_note(struct App *app, int y) {
+    int64_t t = now_ms();
+    if (app->glide_n == 8) {
+        memmove(app->glide_y, app->glide_y + 1, 7 * sizeof app->glide_y[0]);
+        memmove(app->glide_ms, app->glide_ms + 1, 7 * sizeof app->glide_ms[0]);
+        app->glide_n = 7;
+    }
+    app->glide_y[app->glide_n] = y;
+    app->glide_ms[app->glide_n] = t;
+    app->glide_n++;
+}
+
+/* Pixels per millisecond over the last 80ms of the finger, not the last sample alone. */
+static float glide_speed(const struct App *app) {
+    if (app->glide_n < 2) {
+        return 0.f;
+    }
+    int last = app->glide_n - 1;
+    int64_t end = app->glide_ms[last];
+    int first = last;
+    while (first > 0 && end - app->glide_ms[first - 1] <= 80) {
+        first--;
+    }
+    int64_t dt = end - app->glide_ms[first];
+    if (dt < 8) {
+        return 0.f;
+    }
+    return (float)(app->glide_y[first] - app->glide_y[last]) / (float)dt;
 }
 
 static int on_input(struct android_app *android, AInputEvent *event) {
@@ -1171,9 +1653,77 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         int x = (int)AMotionEvent_getX(event, 0);
         int y = (int)AMotionEvent_getY(event, 0);
         if (action == AMOTION_EVENT_ACTION_DOWN) {
-            if (chrome_hit(&app->chrome, x, y) >= 0) {
+            /* Pause the slide, but keep its speed so a flick in the same direction can add to it. */
+            app->glide = 0;
+            app->glide_n = 0;
+            if (app->settings) {
+                app->glide_v = 0.f;
+                app->drag = 1;
+                app->drag_x = x;
+                app->drag_y = y;
+                app->drag_last = y;
+                app->drag_mode = 0;
+                app->drag_at = now_ms();
+                app->edge = 0;
+                return 1;
+            }
+            int down_hit = chrome_hit(&app->chrome, x, y);
+            if (down_hit >= CHROME_BOLD && down_hit < CHROME_COUNT) {
+                app->glide_v = 0.f;
+                app->drag = 1;
+                app->bar_hit = down_hit;
+                app->drag_x = x;
+                app->drag_y = y;
+                app->drag_last = x;
+                app->drag_mode = 0;
+                app->drag_at = now_ms();
+                app->edge = 0;
+                return 1;
+            }
+            app->bar_hit = -1;
+            if (down_hit >= 0) {
+                app->glide_v = 0.f;
                 app->drag = 0;
                 return 0;
+            }
+            if (sel_row(app, x, y) >= 0) {
+                app->glide_v = 0.f;
+                app->drag = 0;
+                return 0;
+            }
+            if (!app->settings && app->chrome.text_h > 0 &&
+                x >= app->chrome.text_x + app->chrome.text_w - 28 && x < app->chrome.text_x + app->chrome.text_w &&
+                y >= app->chrome.text_y && y < app->chrome.text_y + app->chrome.text_h) {
+                app->glide_v = 0.f;
+                app->glide_carry = 0.f;
+                app->glide = 0;
+                page_fling_cancel();
+                app->drag = 1;
+                app->drag_x = x;
+                app->drag_y = y;
+                app->drag_last = y;
+                app->drag_mode = 5;
+                app->drag_at = now_ms();
+                app->edge = 0;
+                float span = (float)app->chrome.text_h;
+                float frac = span > 1.f ? (float)(y - app->chrome.text_y) / span : 0.f;
+                page_scroll_place(frac);
+                render(app);
+                return 1;
+            }
+            int edge = page_sel_edge(x, y, 48);
+            if (edge >= 0 && doc_caret(app->doc) != doc_anchor(app->doc)) {
+                app->glide_v = 0.f;
+                app->drag = 1;
+                app->drag_x = x;
+                app->drag_y = y;
+                app->drag_last = y;
+                app->drag_mode = 4;
+                app->tug = edge;
+                app->sel_menu = 0;
+                app->drag_at = now_ms();
+                app->edge = 0;
+                return 1;
             }
             app->drag = 1;
             app->drag_x = x;
@@ -1181,15 +1731,77 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             app->drag_last = y;
             app->drag_mode = 0;
             app->drag_at = now_ms();
+            app->glide_carry = page_fling_velocity((int)(now_ms() - app->glide_at));
+            app->glide = 0;
+            app->glide_n = 0;
             app->edge = 0;
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_CANCEL) {
             app->drag = 0;
+            app->glide = 0;
+            app->glide_v = 0.f;
             app->edge = 0;
+            app->bar_hit = -1;
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_MOVE && app->drag) {
+            if (app->bar_hit >= CHROME_BOLD) {
+                int dx = x - app->drag_x;
+                int dy = y - app->drag_y;
+                if (dx < 0) {
+                    dx = -dx;
+                }
+                if (dy < 0) {
+                    dy = -dy;
+                }
+                if (app->drag_mode == 0 && dx > dy && dx > 36) {
+                    app->drag_mode = 3;
+                }
+                if (app->drag_mode == 3) {
+                    app->bar_scroll += app->drag_last - x;
+                    app->drag_last = x;
+                    render(app);
+                }
+                return 1;
+            }
+            if (app->drag_mode == 5) {
+                float span = (float)app->chrome.text_h;
+                float frac = span > 1.f ? (float)(y - app->chrome.text_y) / span : 0.f;
+                page_scroll_place(frac);
+                render(app);
+                return 1;
+            }
+            if (app->drag_mode == 4) {
+                size_t len = 0;
+                const char *text = doc_text(app->doc, &len);
+                size_t at = page_hit(app->chrome.text_x, app->chrome.text_y, app->chrome.text_w, app->chrome.text_h,
+                                     text, len, doc_caret(app->doc), app->font_px, x, y);
+                move_edge(app, app->tug, at);
+                app->compose_n = 0;
+                render(app);
+                return 1;
+            }
+            if (app->settings) {
+                int dx = x - app->drag_x;
+                int dy = y - app->drag_y;
+                if (dx < 0) {
+                    dx = -dx;
+                }
+                if (dy < 0) {
+                    dy = -dy;
+                }
+                if (app->drag_mode == 0 && (dx > 36 || dy > 36)) {
+                    app->drag_mode = 1;
+                }
+                if (app->drag_mode == 1) {
+                    int *scroll = app->contents ? &app->contents_scroll : &app->menu_scroll;
+                    *scroll += app->drag_last - y;
+                    app->drag_last = y;
+                    render(app);
+                }
+                return 1;
+            }
             int dx = x - app->drag_x;
             int dy = y - app->drag_y;
             if (dx < 0) {
@@ -1198,7 +1810,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             if (dy < 0) {
                 dy = -dy;
             }
-            /* A quick drag scrolls, unless it starts on the caret. A held press selects. No fling. */
+            /* A quick drag scrolls, unless it starts on the caret. A held press selects. */
             if (app->drag_mode == 0 && (dx > 36 || dy > 36)) {
                 int held = now_ms() - app->drag_at >= HOLD_MS;
                 int near = page_caret_near(app->drag_x, app->drag_y, 72);
@@ -1210,7 +1822,9 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 }
             }
             if (app->drag_mode == 1) {
-                int rows = page_center_drag(app->drag_last - y);
+                int delta = app->drag_last - y;
+                glide_note(app, y);
+                int rows = page_center_drag(delta);
                 app->drag_last = y;
                 if (rows != 0) {
                     int step = rows > 0 ? 1 : -1;
@@ -1236,15 +1850,109 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         }
         if (action == AMOTION_EVENT_ACTION_UP) {
             int dragged = app->drag && app->drag_mode != 0;
+            int scrolling = app->drag_mode == 1;
+            app->bar_hit = -1;
             int selecting = app->drag_mode == 2;
             app->drag = 0;
             app->edge = 0;
+            if (scrolling) {
+                glide_note(app, y);
+                float flick = glide_speed(app) * 1000.f * page_glide_gain();
+                if (flick > 200.f || flick < -200.f) {
+                    float dpi = 160.f;
+                    if (app->android != NULL && app->android->config != NULL) {
+                        int density = AConfiguration_getDensity(app->android->config);
+                        if (density >= 120 && density <= 1000) {
+                            dpi = (float)density;
+                        }
+                    }
+                    float v = app->glide_carry + flick;
+                    if (v > 30000.f) {
+                        v = 30000.f;
+                    }
+                    if (v < -30000.f) {
+                        v = -30000.f;
+                    }
+                    if (page_fling_arm(v, dpi)) {
+                        app->glide = 1;
+                        app->glide_frac = 0.f;
+                        app->glide_at = now_ms();
+                    } else {
+                        app->glide = 0;
+                    }
+                } else {
+                    page_fling_cancel();
+                    app->glide = 0;
+                    app->glide_carry = 0.f;
+                }
+            } else {
+                page_fling_cancel();
+                app->glide = 0;
+                app->glide_carry = 0.f;
+            }
             if (dragged) {
                 app->tap_pending = 0;
                 app->tap_at = 0;
-                if (selecting) {
-                    show_keyboard(app);
+                if (selecting && doc_caret(app->doc) != doc_anchor(app->doc)) {
+                    app->sel_menu = 1;
+                    claim_back(app);
+                    render(app);
+                } else if (app->drag_mode == 4 && doc_caret(app->doc) != doc_anchor(app->doc)) {
+                    app->sel_menu = 1;
+                    claim_back(app);
+                    render(app);
                 }
+                return 1;
+            }
+            int chosen = sel_row(app, x, y);
+            if (chosen >= 0) {
+                app->tap_pending = 0;
+                app->tap_at = 0;
+                if (chosen == 0) {
+                    page_set_readonly(0);
+                    app->sel_menu = 0;
+                    render(app);
+                    show_keyboard(app);
+                } else if (chosen == 1) {
+                    copy_selection(app);
+                    app->sel_menu = 0;
+                    render(app);
+                } else if (!page_readonly() && copy_selection(app) && doc_backspace(app->doc) == 0) {
+                    app->sel_menu = 0;
+                    save_doc(app);
+                    render(app);
+                }
+                return 1;
+            }
+            if (app->settings && app->contents) {
+                app->tap_pending = 0;
+                app->tap_at = 0;
+                int row = -1;
+                int n = app->contents_n;
+                if (n < 0) {
+                    n = 0;
+                }
+                if (n > PAGE_HEADS_MAX + 2) {
+                    n = PAGE_HEADS_MAX + 2;
+                }
+                int row_h = app->contents_row_h > 0 ? app->contents_row_h : 1;
+                for (int i = 0; i < n; i++) {
+                    int y0 = app->contents_row_y[i];
+                    if (y >= y0 && y < y0 + row_h) {
+                        row = i;
+                        break;
+                    }
+                }
+                if (row == 0) {
+                    app->contents = 0;
+                    app->contents_scroll = 0;
+                } else if (row > 0 && app->head_n > 0 && row - 1 < app->head_n && row - 1 < PAGE_HEADS_MAX) {
+                    doc_place(app->doc, app->head_at[row - 1]);
+                    page_set_follow(1);
+                    app->settings = 0;
+                    app->contents = 0;
+                }
+                render(app);
                 return 1;
             }
             int hit = chrome_hit(&app->chrome, x, y);
@@ -1254,15 +1962,75 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             }
             if (hit == CHROME_SETTINGS) {
                 app->settings = 1;
+                app->options = 0;
+                app->contents = 0;
+                app->menu_scroll = 0;
+                hide_keyboard(app);
+                claim_back(app);
+            } else if (hit == CHROME_OPTIONS) {
+                app->options = 1;
+                app->menu_scroll = 0;
+                claim_back(app);
             } else if (hit == CHROME_OPEN) {
                 app->settings = 0;
+                app->contents = 0;
                 pick_file(app, 0);
             } else if (hit == CHROME_SAVE) {
+                int wrote = save_doc(app);
+                app->settings = 0;
+                app->contents = 0;
+                /* The scratch note is private. A refused write needs a place the user picks. */
+                if (wrote != 0 || app->session != SESSION_URI) {
+                    pick_file(app, 1);
+                }
+            } else if (hit == CHROME_SAVE_AS) {
+                app->settings = 0;
+                app->contents = 0;
+                pick_file(app, 1);
+            } else if (hit == CHROME_FIND) {
+                app->settings = 0;
+                app->contents = 0;
+                app->finding = 1;
+                app->query_n = 0;
+                app->query[0] = '\0';
+                app->find_at = doc_caret(app->doc);
+                claim_back(app);
+                render(app);
+                show_keyboard(app);
+                return 1;
+            } else if (hit == CHROME_CONTENTS) {
+                app->contents = 1;
+                app->contents_scroll = 0;
+                hide_keyboard(app);
+                claim_back(app);
+            } else if (hit == CHROME_EXPORT) {
                 save_doc(app);
                 app->settings = 0;
-                pick_file(app, 1);
+                app->contents = 0;
+                size_t len = 0;
+                const char *text = doc_text(app->doc, &len);
+                char *html = NULL;
+                size_t html_n = 0;
+                if (html_export(text, len, &html, &html_n) == 0 && app->export_path[0] != '\0') {
+                    FILE *out = fopen(app->export_path, "wb");
+                    if (out != NULL) {
+                        size_t wrote = fwrite(html, 1, html_n, out);
+                        int closed = fclose(out);
+                        if (wrote == html_n && closed == 0) {
+                            pick_file(app, 2);
+                        }
+                    }
+                }
+                free(html);
             } else if (hit == CHROME_DONE) {
-                app->settings = 0;
+                if (app->options) {
+                    app->options = 0;
+                    app->menu_scroll = 0;
+                } else {
+                    app->settings = 0;
+                    app->options = 0;
+                    app->contents = 0;
+                }
             } else if (app->settings && hit < 0) {
                 render(app);
                 return 1;
@@ -1271,20 +2039,69 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             } else if (hit == CHROME_LARGER && app->step + 1 < text_step_count()) {
                 app->step++;
             } else if (hit == CHROME_FONT) {
-                for (int n = 0; n < 3; n++) {
-                    app->face = (app->face + 1) % 3;
-                    if (app->fonts[app->face] != NULL && page_set_font(app->fonts[app->face], app->font_lens[app->face]) == 0) {
+                int faces = app->custom != NULL ? 4 : 3;
+                for (int n = 0; n < faces; n++) {
+                    app->face = (app->face + 1) % faces;
+                    if (app->face == 3 && app->custom != NULL && page_set_font(app->custom, app->custom_len) == 0) {
+                        break;
+                    }
+                    if (app->face < 3 && app->fonts[app->face] != NULL &&
+                        page_set_font(app->fonts[app->face], app->font_lens[app->face]) == 0) {
                         break;
                     }
                 }
+            } else if (hit == CHROME_FONTFILE) {
+                pick_file(app, 3);
             } else if (hit == CHROME_TYPEWRITER) {
                 page_set_typewriter(!page_typewriter());
             } else if (hit == CHROME_FOCUS) {
                 page_set_focus(!page_focus());
+            } else if (hit == CHROME_LINE) {
+                page_set_line(!page_line());
+            } else if (hit == CHROME_GLIDE) {
+                page_set_glide((page_glide_level() + 1) % 5);
             } else if (hit == CHROME_THEME) {
                 page_set_theme(page_theme() == 0 ? 1 : 0);
             } else if (hit == CHROME_SOURCE) {
                 page_set_source(!page_source());
+            } else if (hit == CHROME_READONLY) {
+                page_set_readonly(!page_readonly());
+                if (page_readonly()) {
+                    hide_keyboard(app);
+                }
+            } else if (!page_readonly() && hit >= CHROME_BOLD && hit <= CHROME_BLOCK) {
+                if (hit == CHROME_BOLD) {
+                    doc_mark(app->doc, "**", 2);
+                } else if (hit == CHROME_ITALIC) {
+                    doc_mark(app->doc, "*", 1);
+                } else if (hit == CHROME_STRIKE) {
+                    doc_mark(app->doc, "~~", 2);
+                } else if (hit == CHROME_CODE) {
+                    doc_mark(app->doc, "`", 1);
+                } else if (hit == CHROME_LINK) {
+                    doc_link(app->doc);
+                } else if (hit == CHROME_HEAD) {
+                    doc_line(app->doc, 1);
+                } else if (hit == CHROME_LIST) {
+                    doc_line(app->doc, 2);
+                } else if (hit == CHROME_TASK) {
+                    doc_line(app->doc, 3);
+                } else if (hit == CHROME_QUOTE) {
+                    doc_line(app->doc, 4);
+                } else if (hit == CHROME_RULE) {
+                    doc_block(app->doc, 1);
+                } else if (hit == CHROME_TABLE) {
+                    doc_block(app->doc, 2);
+                } else if (hit == CHROME_BLOCK) {
+                    doc_block(app->doc, 3);
+                }
+                app->compose_n = 0;
+                app->bar_hit = -1;
+                page_set_follow(1);
+                save_doc(app);
+                render(app);
+                show_keyboard(app);
+                return 1;
             } else {
                 size_t len = 0;
                 const char *text = doc_text(app->doc, &len);
@@ -1305,12 +2122,19 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 app->tap_at = t;
                 app->tap_pending = 0;
                 if (doubled) {
-                    doc_place(app->doc, at);
-                    page_set_editing(1);
-                } else {
-                    if (!(page_editing() && page_same_unit(text, len, doc_caret(app->doc), at))) {
-                        page_set_editing(0);
+                    size_t wlo = 0;
+                    size_t whi = 0;
+                    if (doc_word_at(text, len, at, &wlo, &whi) == 0) {
+                        doc_place(app->doc, wlo);
+                        doc_seek(app->doc, whi);
+                        app->sel_menu = 1;
+                        claim_back(app);
+                    } else {
+                        doc_place(app->doc, at);
+                        app->sel_menu = 0;
                     }
+                } else {
+                    app->sel_menu = 0;
                     doc_place(app->doc, at);
                     app->tap_pending = 1;
                     app->tap_off = doc_caret(app->doc);
@@ -1319,7 +2143,9 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 /* A tap stays on this page. Dragging is what scrolls. */
                 page_set_follow(0);
                 render(app);
-                show_keyboard(app);
+                if (app->sel_menu == 0) {
+                    show_keyboard(app);
+                }
                 return 1;
             }
             save_prefs(app);
@@ -1336,12 +2162,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
     int shift = (meta & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON)) != 0;
     int ctrl = (meta & (AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON)) != 0;
     if (code == AKEYCODE_BACK) {
-        if (app->settings) {
-            app->settings = 0;
-            render(app);
-            return 1;
-        }
-        return 0;
+        handle_back(app);
+        return 1;
     }
     if (ctrl && shift &&
         (code == AKEYCODE_T || code == AKEYCODE_F || code == AKEYCODE_P || code == AKEYCODE_S)) {
@@ -1371,7 +2193,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
     }
     if (ctrl && !shift && code == AKEYCODE_X) {
         app->compose_n = 0;
-        if (copy_selection(app) && doc_backspace(app->doc) == 0) {
+        if (!page_readonly() && copy_selection(app) && doc_backspace(app->doc) == 0) {
             save_doc(app);
             page_set_follow(1);
             render(app);
@@ -1380,7 +2202,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
     }
     if (ctrl && !shift && code == AKEYCODE_V) {
         app->compose_n = 0;
-        if (paste_clip(app)) {
+        if (!page_readonly() && paste_clip(app)) {
             save_doc(app);
             page_set_follow(1);
             render(app);
@@ -1388,7 +2210,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         return 1;
     }
     if (ctrl && code == AKEYCODE_Z) {
-        if (doc_undo(app->doc) == 0) {
+        if (!page_readonly() && doc_undo(app->doc) == 0) {
             save_doc(app);
             page_set_follow(1);
             render(app);
@@ -1396,6 +2218,9 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         return 1;
     }
     if (code == AKEYCODE_TAB) {
+        if (page_readonly()) {
+            return 1;
+        }
         int rc = doc_table_tab(app->doc, shift ? -1 : 1);
         if (rc >= 0) {
             app->compose_n = 0;
@@ -1407,8 +2232,19 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         }
         return 1;
     }
+    if (app->finding && (code == AKEYCODE_ENTER || code == AKEYCODE_NUMPAD_ENTER)) {
+        find_run(app, 1);
+        return 1;
+    }
     if (code == AKEYCODE_DEL || code == AKEYCODE_FORWARD_DEL) {
         app->compose_n = 0;
+        if (app->finding) {
+            find_pop(app);
+            return 1;
+        }
+        if (page_readonly()) {
+            return 1;
+        }
         int rc = code == AKEYCODE_FORWARD_DEL ? doc_delete(app->doc) : doc_backspace(app->doc);
         if (rc == 0) {
             save_doc(app);
@@ -1480,6 +2316,17 @@ static int on_input(struct android_app *android, AInputEvent *event) {
     if (ch <= 0 || (unsigned)ch > 0x10ffff) {
         return 0;
     }
+    if (app->finding) {
+        char bytes[4];
+        int n = utf8_encode((unsigned)ch, bytes);
+        if (n > 0) {
+            find_type(app, bytes, (size_t)n);
+        }
+        return 1;
+    }
+    if (page_readonly()) {
+        return 1;
+    }
     app->compose_n = 0;
     char bytes[4];
     int n = utf8_encode((unsigned)ch, bytes);
@@ -1507,7 +2354,10 @@ static void on_cmd(struct android_app *android, int32_t cmd) {
         stop_gl(app);
         break;
     case APP_CMD_GAINED_FOCUS:
-        show_keyboard(app);
+        /* A back that closed the keyboard must not open it again on the focus that follows. */
+        if (!g_keyboard_hold) {
+            show_keyboard(app);
+        }
         render(app);
         break;
     case APP_CMD_PAUSE:
@@ -1547,9 +2397,48 @@ static unsigned char *load_asset(AAssetManager *manager, const char *name, int *
     return bytes;
 }
 
+enum { FONT_MAX = 8 * 1024 * 1024 };
+
+/* 0 when the file is a TrueType the painter can read. The previous face stays put on failure. */
+static int apply_custom_font(struct App *app) {
+    if (app->font_path[0] == '\0') {
+        return -1;
+    }
+    FILE *f = fopen(app->font_path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    long sz = ftell(f);
+    if (sz <= 0 || sz > FONT_MAX || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+    unsigned char *buf = malloc((size_t)sz);
+    if (buf == NULL) {
+        fclose(f);
+        return -1;
+    }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (n != (size_t)sz || page_set_font(buf, (int)n) != 0) {
+        free(buf);
+        return -1;
+    }
+    free(app->custom);
+    app->custom = buf;
+    app->custom_len = (int)n;
+    app->face = 3;
+    return 0;
+}
+
 void android_main(struct android_app *android) {
     struct App app;
     memset(&app, 0, sizeof app);
+    app.bar_hit = -1;
     app.android = android;
     app.display = EGL_NO_DISPLAY;
     app.surface = EGL_NO_SURFACE;
@@ -1579,25 +2468,43 @@ void android_main(struct android_app *android) {
         if (wrote < 0 || (size_t)wrote >= sizeof app.last_path) {
             app.last_path[0] = '\0';
         }
+        wrote = snprintf(app.export_path, sizeof app.export_path, "%s/export.html", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.export_path) {
+            app.export_path[0] = '\0';
+        }
         wrote = snprintf(app.prefs_path, sizeof app.prefs_path, "%s/prefs", dir);
         if (wrote < 0 || (size_t)wrote >= sizeof app.prefs_path) {
             app.prefs_path[0] = '\0';
         }
+        wrote = snprintf(app.font_path, sizeof app.font_path, "%s/custom.ttf", dir);
+        if (wrote < 0 || (size_t)wrote >= sizeof app.font_path) {
+            app.font_path[0] = '\0';
+        }
     }
     load_prefs(&app);
+    if (!page_readonly()) {
+        page_set_editing(1);
+    }
     refresh_session(&app);
     static const char *k_faces[] = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
                                     "LiberationMono-Regular.ttf"};
     for (int i = 0; i < 3; i++) {
         app.fonts[i] = load_asset(android->activity->assetManager, k_faces[i], &app.font_lens[i]);
     }
-    if (app.face < 0 || app.face > 2) {
+    if (app.face < 0 || app.face > 3) {
         app.face = 0;
     }
-    if (app.fonts[app.face] == NULL || page_set_font(app.fonts[app.face], app.font_lens[app.face]) != 0) {
-        app.face = 0;
-        if (app.fonts[0] == NULL || page_set_font(app.fonts[0], app.font_lens[0]) != 0) {
-            LOGE("font failed");
+    if (app.face == 3 && apply_custom_font(&app) == 0) {
+        /* The chosen file is the face. */
+    } else {
+        if (app.face < 0 || app.face > 2) {
+            app.face = 0;
+        }
+        if (app.fonts[app.face] == NULL || page_set_font(app.fonts[app.face], app.font_lens[app.face]) != 0) {
+            app.face = 0;
+            if (app.fonts[0] == NULL || page_set_font(app.fonts[0], app.font_lens[0]) != 0) {
+                LOGE("font failed");
+            }
         }
     }
     android->userData = &app;
@@ -1616,7 +2523,9 @@ void android_main(struct android_app *android) {
         int events = 0;
         struct android_poll_source *source = NULL;
         int wait = -1;
-        if (app.edge != 0 && app.drag_mode == 2) {
+        if (app.glide && !app.drag) {
+            wait = 0;
+        } else if (app.edge != 0 && app.drag_mode == 2) {
             wait = 32;
         } else if (app.drag && app.drag_mode == 0) {
             int64_t left = app.drag_at + HOLD_MS - now_ms();
@@ -1628,13 +2537,37 @@ void android_main(struct android_app *android) {
         int ident = ALooper_pollOnce(wait, NULL, &events, (void **)&source);
         if (ident == ALOOPER_POLL_TIMEOUT && app.tap_pending && now_ms() - app.tap_at >= TAP_MS) {
             app.tap_pending = 0;
-            if (doc_caret(app.doc) == app.tap_off && doc_toggle_task(app.doc, app.tap_off) == 0) {
+            if (!page_readonly() && doc_caret(app.doc) == app.tap_off && doc_toggle_task(app.doc, app.tap_off) == 0) {
                 save_doc(&app);
                 page_set_follow(0);
                 render(&app);
             }
-        } else if (ident == ALOOPER_POLL_TIMEOUT && app.drag && app.drag_mode == 0 && now_ms() - app.drag_at >= HOLD_MS) {
+        } else if (ident == ALOOPER_POLL_TIMEOUT && app.drag && app.drag_mode == 0 && !app.settings &&
+                   app.bar_hit < CHROME_BOLD && now_ms() - app.drag_at >= HOLD_MS) {
             arm_select(&app);
+        } else if (ident == ALOOPER_POLL_TIMEOUT && app.glide && !app.drag) {
+            int64_t now = now_ms();
+            int elapsed = (int)(now - app.glide_at);
+            if (elapsed < 0) {
+                elapsed = 0;
+            }
+            float step = page_fling_step(elapsed) + app.glide_frac;
+            int px = (int)step;
+            app.glide_frac = step - (float)px;
+            int rows = page_center_drag(px);
+            if (rows != 0) {
+                int step_row = rows > 0 ? 1 : -1;
+                int n = rows > 0 ? rows : -rows;
+                for (int i = 0; i < n && i < 8; i++) {
+                    doc_move_row(app.doc, step_row);
+                }
+                app.compose_n = 0;
+            }
+            if (!page_fling_active()) {
+                app.glide = 0;
+                app.glide_carry = 0.f;
+            }
+            render(&app);
         } else if (ident == ALOOPER_POLL_TIMEOUT && app.edge != 0 && app.drag_mode == 2) {
             page_scroll_by(app.edge > 0 ? 64 : -64);
             size_t len = 0;
@@ -1650,13 +2583,31 @@ void android_main(struct android_app *android) {
             apply_ime(&app);
             int reload = g_reload;
             g_reload = 0;
+            int redraw = g_redraw;
+            g_redraw = 0;
+            if (g_font_pick) {
+                g_font_pick = 0;
+                if (apply_custom_font(&app) == 0) {
+                    save_prefs(&app);
+                    render(&app);
+                } else {
+                    LOGE("font file did not load");
+                }
+            }
             if (reload == 2 && write_uri(&app) == 0) {
                 refresh_session(&app);
             } else if (reload == 1) {
                 refresh_session(&app);
             }
+            int back = g_back;
+            g_back = 0;
             if (reload != 0) {
                 app.settings = 0;
+                app.contents = 0;
+                render(&app);
+            } else if (back) {
+                handle_back(&app);
+            } else if (redraw) {
                 render(&app);
             }
         } else if (ident >= 0 && source != NULL) {
@@ -1675,4 +2626,5 @@ void android_main(struct android_app *android) {
     for (int i = 0; i < 3; i++) {
         free(app.fonts[i]);
     }
+    free(app.custom);
 }

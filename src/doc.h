@@ -18,6 +18,26 @@ size_t doc_anchor(const Doc *doc);
 /* Insert UTF-8, replacing the selection. Returns 0, or -1 if utf8 is invalid or allocation fails. */
 int doc_insert(Doc *doc, const char *utf8, size_t n);
 
+/* Wrap the selection in mark, or remove that wrap when it is already there.
+   An empty selection inserts the mark, the caret, and the mark again.
+   mark is a short UTF-8 string such as "**", "*", "~~", or "`", at most 8 bytes.
+   Returns 0, or -1. */
+int doc_mark(Doc *doc, const char *mark, size_t n);
+
+/* Turn the selection into a link. The caret ends between () when text was selected, and inside [] when it was not. */
+int doc_link(Doc *doc);
+
+/* Toggle a mark on each line the selection touches.
+   1 cycles a heading through #, ##, ###, then off. 2 is a bullet. 3 is a task. 4 is a quote. */
+int doc_line(Doc *doc, int kind);
+
+/* Insert a block at the caret. 1 is a rule, 2 is a table, 3 is a fenced block. The caret ends inside it. */
+int doc_block(Doc *doc, int kind);
+
+/* The word around byte_off: a run of characters that are not space, tab, or newline.
+   Returns 0 and sets [lo, hi), or -1 when byte_off is not in a word. */
+int doc_word_at(const char *text, size_t len, size_t byte_off, size_t *lo, size_t *hi);
+
 /* Delete the selection, or the code point before the caret. Returns 0, or -1 if nothing can be deleted. */
 int doc_backspace(Doc *doc);
 

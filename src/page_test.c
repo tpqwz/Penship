@@ -174,12 +174,18 @@ static void test_user_scroll(const unsigned char *font, int font_len) {
     page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
     int back = ink_rows(px, width, margin, margin + font_px);
     expect(back > 8, "scrolling toward the start shows T");
+    const uint8_t *bar = px + ((size_t)(margin + 8) * (size_t)width + (size_t)(width - 6)) * 4;
+    expect(bar[0] != PAGE_PAPER_R || bar[1] != PAGE_PAPER_G || bar[2] != PAGE_PAPER_B,
+           "a long note shows a scrollbar");
     page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
     expect(ink_rows(px, width, margin, margin + font_px) > 8, "moving the caret without follow stays on the page");
     page_set_follow(1);
     page_draw(px, width, height, 0, 0, width, height, text, sizeof text, sizeof text, sizeof text, font_px);
     expect(ink_rows(px, width, 0, margin + 4) == 0, "follow brings the caret back");
     page_draw(px, width, height, 0, 0, width, height, "T", 1, 0, 0, font_px);
+    bar = px + ((size_t)(margin + 8) * (size_t)width + (size_t)(width - 6)) * 4;
+    expect(bar[0] == PAGE_PAPER_R && bar[1] == PAGE_PAPER_G && bar[2] == PAGE_PAPER_B,
+           "a short note has no scrollbar");
     expect(page_caret_near(margin, margin + 4, 64), "the caret sits by the margin");
     expect(!page_caret_near(width - 2, height - 2, 24), "the far corner is not the caret");
     const char *many = "alpha\nbeta\ngamma\ndelta\n";
@@ -188,6 +194,10 @@ static void test_user_scroll(const unsigned char *font, int font_len) {
     int measured = page_measures() - before;
     page_draw(px, width, height, 0, 0, width, height, many, strlen(many), 0, 0, font_px);
     expect(measured > 0 && page_measures() == before + measured, "a redraw reuses the line index");
+    before = page_measures();
+    page_draw(px, width, height, 0, 0, width, height, many, strlen(many), 6, 6, font_px);
+    int moved = page_measures() - before;
+    expect(moved == 1, "moving the caret measures only that line");
     expect(page_drag_kind(0, 0, 0, 0) == 0, "a press is still deciding");
     expect(page_drag_kind(1, 0, 0, 0) == 1, "a quick drag scrolls");
     expect(page_drag_kind(1, 0, 1, 0) == 2, "a drag from the caret selects");
@@ -401,12 +411,15 @@ static void test_rendered(const unsigned char *font, int font_len) {
 
     const char *fence = "```\na\n```\nZ";
     page_set_editing(1);
+    page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), 0, 0, font_px);
+    int fence_open = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
     page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), 4, 4, font_px);
-    int fence_source = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    int fence_line = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
     page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), strlen(fence), strlen(fence), font_px);
     page_set_editing(0);
     int fence_rendered = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
-    expect(fence_rendered > 0 && fence_rendered < fence_source, "rendered fence hides the ticks");
+    expect(fence_open > fence_line, "a fence shows marks only on the caret line");
+    expect(fence_rendered > 0 && fence_rendered < fence_open, "rendered fence hides the ticks");
     expect(page_same_unit(fence, strlen(fence), 0, 4) == 1, "a fence is one segment");
     expect(page_same_unit(head, strlen(head), 0, strlen(head)) == 0, "two lines are two segments");
     expect(near_rgb(px, width, height, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B), "rendered fence keeps the wash");
@@ -497,11 +510,11 @@ static void test_rendered(const unsigned char *font, int font_len) {
 
     const char *tilde = "~~~\na\n~~~\nZ";
     page_set_editing(1);
+    page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), 0, 0, font_px);
+    int tilde_open = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
     page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), 4, 4, font_px);
-    int tilde_source = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
-    page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), strlen(tilde), strlen(tilde), font_px);
-    int tilde_rendered = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
-    expect(tilde_rendered > 0 && tilde_rendered < tilde_source, "a tilde fence hides its ticks");
+    int tilde_line = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
+    expect(tilde_line > 0 && tilde_line < tilde_open, "a tilde fence shows marks only on the caret line");
 
     const char *flat = "- H\nZ";
     const char *nested = "    - H\nZ";
@@ -595,6 +608,27 @@ static void test_rendered(const unsigned char *font, int font_len) {
     }
     expect(near_rgb(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B), "rendered code keeps its word");
     expect(code_source > code_rendered, "rendered code hides its ticks");
+
+    page_set_readonly(1);
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), 0, 0, font_px);
+    int head_ro = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    page_set_readonly(0);
+    page_draw(px, width, height, 0, 0, width, height, head, strlen(head), 0, 0, font_px);
+    int head_live = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
+    expect(head_live > head_ro, "read only hides marks on the caret line");
+
+    page_set_line(1);
+    page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
+    expect(near_rgb(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B), "the caret line highlight leaves the letter visible");
+    int band_y = page_margin(font_px) + 2;
+    const uint8_t *wash = px + ((size_t)band_y * (size_t)width + 4) * 4;
+    expect(wash[0] != PAGE_PAPER_R || wash[1] != PAGE_PAPER_G || wash[2] != PAGE_PAPER_B,
+           "the caret line highlight is a wash");
+    page_set_line(0);
+    page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
+    wash = px + ((size_t)band_y * (size_t)width + 4) * 4;
+    expect(wash[0] == PAGE_PAPER_R && wash[1] == PAGE_PAPER_G && wash[2] == PAGE_PAPER_B,
+           "the caret line highlight turns off");
     page_set_editing(0);
 
     const char *counted = "one two\nthree";
@@ -607,6 +641,65 @@ static void test_rendered(const unsigned char *font, int font_len) {
     expect(page_heading(heads, strlen(heads), 0, 1) == 2, "the next heading is B");
     expect(page_heading(heads, strlen(heads), 2, 1) == 8, "the heading after B is D");
     expect(page_heading(heads, strlen(heads), 8, -1) == 2, "the heading before D is B");
+
+    page_set_editing(1);
+    const char *escaped = "\\*Hi\\*\nZ";
+    page_draw(px, width, height, 0, 0, width, height, escaped, strlen(escaped), strlen(escaped), strlen(escaped),
+              font_px);
+    expect(!near_rgb(px, width, height, PAGE_EM_R, PAGE_EM_G, PAGE_EM_B), "an escaped star is not emphasis");
+    const char *address = "<https://penship.app>\nZ";
+    page_draw(px, width, height, 0, 0, width, height, address, strlen(address), 0, 0, font_px);
+    int address_source = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            address_source += ink_at(px, width, x, y);
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, address, strlen(address), strlen(address), strlen(address),
+              font_px);
+    int address_rendered = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            address_rendered += ink_at(px, width, x, y);
+        }
+    }
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an autolink is a link");
+    expect(address_source > address_rendered, "an autolink hides its brackets off the caret line");
+    const char *indented = "    code\nZ";
+    page_set_editing(1);
+    page_draw(px, width, height, 0, 0, width, height, indented, strlen(indented), strlen(indented), strlen(indented),
+              font_px);
+    expect(near_rgb(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B), "indented code keeps its color");
+    expect(near_rgb(px, width, height, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B), "indented code keeps the wash");
+    const char *nested_list = "    - item\nZ";
+    page_draw(px, width, height, 0, 0, width, height, nested_list, strlen(nested_list), strlen(nested_list),
+              strlen(nested_list), font_px);
+    expect(count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B) > 8, "an indented marker stays a list");
+    const char *ref = "[Hi][id]\n\n[id]: https://example.com\nZ";
+    page_draw(px, width, height, 0, 0, width, height, ref, strlen(ref), strlen(ref), strlen(ref), font_px);
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "a reference link shows its words");
+    int ref_rendered = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            ref_rendered += ink_at(px, width, x, y);
+        }
+    }
+    page_draw(px, width, height, 0, 0, width, height, ref, strlen(ref), 0, 0, font_px);
+    int ref_source = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            ref_source += ink_at(px, width, x, y);
+        }
+    }
+    expect(ref_source > ref_rendered, "the caret line shows the reference marks");
+    const char *missing = "[Nope]\nZ";
+    page_draw(px, width, height, 0, 0, width, height, missing, strlen(missing), strlen(missing), strlen(missing),
+              font_px);
+    expect(!near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an undefined shortcut stays text");
+    const char *mail = "<me@penship.app>\nZ";
+    page_draw(px, width, height, 0, 0, width, height, mail, strlen(mail), strlen(mail), strlen(mail), font_px);
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an email autolink is a link");
+    page_set_editing(0);
     free(px);
 }
 
@@ -640,12 +733,12 @@ static void test_label(const unsigned char *font, int font_len) {
     int ws[] = {200};
     int hs[] = {80};
     const char *labels[] = {"Font"};
-    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, labels, 0, 32);
+    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, labels, 0, 32, 0, height);
     expect(near_rgb(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B), "a label is drawn");
     expect(px[0] == 0 && px[1] == 0 && px[2] == 0, "a label stays inside its cell");
     memset(px, 0, (size_t)width * (size_t)height * 4);
     const char *empty[] = {""};
-    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, empty, 0, 32);
+    page_draw_labels(px, width, height, 1, xs, ys, ws, hs, empty, 0, 32, 0, height);
     expect(px[0] == 0, "an empty label draws nothing");
     free(px);
 }
@@ -691,6 +784,25 @@ static void test_menu(void) {
     expect(px_eq(px, width, cx, cy, PAGE_NIGHT_INK_R, PAGE_NIGHT_INK_G, PAGE_NIGHT_INK_B),
            "a bar follows the night ink");
     page_set_theme(0);
+    memset(px, 0, (size_t)width * (size_t)height * 4);
+    int tools_ok = 1;
+    for (int tool = 0; tool < 12; tool++) {
+        memset(px, 0, (size_t)width * (size_t)height * 4);
+        page_draw_tool(px, width, height, 8, 8, 64, 64, tool);
+        int mark = 0;
+        for (int y = 8; y < 72; y++) {
+            for (int x = 8; x < 72; x++) {
+                const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+                if (p[0] != 0 || p[1] != 0 || p[2] != 0) {
+                    mark++;
+                }
+            }
+        }
+        if (mark < 30 || mark > 64 * 64 / 2) {
+            tools_ok = 0;
+        }
+    }
+    expect(tools_ok, "each format mark is a stroke, not a filled block");
     free(px);
 }
 
@@ -715,7 +827,7 @@ static void test_modes(const unsigned char *font, int font_len) {
     int below = 0;
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            if (!ink_at(px, width, x, y)) {
+            if (x >= width - 12 || !ink_at(px, width, x, y)) {
                 continue;
             }
             if (y < height / 2) {
@@ -732,7 +844,7 @@ static void test_modes(const unsigned char *font, int font_len) {
     int mid = 0;
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            if (!ink_at(px, width, x, y)) {
+            if (x >= width - 12 || !ink_at(px, width, x, y)) {
                 continue;
             }
             if (y < height / 3) {
@@ -796,7 +908,77 @@ static void test_scroll(const unsigned char *font, int font_len) {
     free(px);
 }
 
+static void test_glide(void) {
+    page_set_glide(2);
+    expect(page_fling_arm(8000.f, 160.f) == 1, "a browser flick starts");
+    expect(page_fling_at(0) == 0.f, "a fling starts at the finger");
+    float early = page_fling_at(180);
+    float all = page_fling_at(100000);
+    expect(all > 4000.f && early > 0.f && early < all, "medium carries like a long page");
+    expect(page_fling_step(0) == 0.f, "the first instant does not jump");
+    float moved = page_fling_step(180);
+    expect(moved > 100.f, "the fling has moved by then");
+    expect(page_fling_step(180) == 0.f, "the same moment is not applied twice");
+    page_set_glide(1);
+    expect(page_fling_arm(8000.f, 160.f) == 1, "a short flick starts");
+    float short_d = page_fling_at(100000);
+    page_set_glide(4);
+    expect(page_fling_arm(8000.f, 160.f) == 1, "a far flick starts");
+    float far_d = page_fling_at(100000);
+    expect(far_d > short_d * 2.f, "far carries much farther than short");
+    page_set_glide(0);
+    expect(page_fling_arm(8000.f, 160.f) == 0, "glide off does not fling");
+    page_set_glide(2);
+}
+
+static void test_find(void) {
+    const char *text = "Alpha beta ALPHA";
+    size_t n = strlen(text);
+    expect(page_find(text, n, "alpha", 5, 0, 1) == 0, "find ignores ASCII case");
+    expect(page_find(text, n, "alpha", 5, 1, 1) == 11, "find continues after the caret");
+    expect(page_find(text, n, "alpha", 5, n, 1) == 0, "find wraps to the start");
+    expect(page_find(text, n, "alpha", 5, 11, -1) == 0, "find backward stops before the caret");
+    expect(page_find(text, n, "alpha", 5, 0, -1) == 11, "find backward wraps");
+    expect(page_find(text, n, "", 0, 0, 1) == n, "an empty find misses");
+    expect(page_find(text, n, "nope", 4, 0, 1) == n, "a missing word misses");
+    const char *utf = "caf\xc3\xa9";
+    expect(page_find(utf, 5, "\xa9", 1, 0, 1) == 5, "a find does not start on a continuation byte");
+}
+
+static void test_heads(void) {
+    struct PageHead heads[4];
+    const char *note = "a\n# B\n```\n# nope\n```\n## Cee\nTitle\n====\n";
+    int n = page_heads(note, strlen(note), heads, 4);
+    expect(n == 3, "three headings outside the fence");
+    expect(heads[0].at == 2 && heads[0].level == 1 && strcmp(heads[0].title, "B") == 0, "first heading is B");
+    expect(heads[1].at == 21 && heads[1].level == 2 && strcmp(heads[1].title, "Cee") == 0, "second heading is Cee");
+    expect(heads[2].at == 28 && heads[2].level == 1 && strcmp(heads[2].title, "Title") == 0, "setext heading");
+    expect(page_heads(note, strlen(note), heads, 1) == 1, "the list stops at the cap");
+    expect(page_heads(note, strlen(note), NULL, 4) == 0, "a null list is refused");
+    expect(page_heads(NULL, 3, heads, 4) == 0, "a null note is empty");
+    const char *closed = "# Hi #\n";
+    expect(page_heads(closed, strlen(closed), heads, 1) == 1 && strcmp(heads[0].title, "Hi") == 0,
+           "closing hashes stay out of the title");
+    const char *stuck = "#Hi\n";
+    expect(page_heads(stuck, strlen(stuck), heads, 1) == 0, "a hash without a space is not a heading");
+    char cut[80];
+    cut[0] = '#';
+    cut[1] = ' ';
+    for (int i = 0; i < 70; i++) {
+        cut[2 + i] = 'a';
+    }
+    cut[72] = (char)0xc3;
+    cut[73] = (char)0xa9;
+    cut[74] = '\n';
+    expect(page_heads(cut, 75, heads, 1) == 1, "a heading with a trailing e-acute");
+    size_t tn = strlen(heads[0].title);
+    expect(tn == 70 && heads[0].title[tn] == '\0', "the title stops before a split code point");
+}
+
 int main(void) {
+    test_heads();
+    test_find();
+    test_glide();
     int font_len = 0;
     unsigned char *font = load_font(&font_len);
     if (font != NULL) {

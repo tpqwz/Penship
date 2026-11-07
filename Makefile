@@ -40,11 +40,16 @@ build/ime_test: src/ime.c src/ime_test.c src/ime.h src/utf8.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -pthread -o $@ src/ime_test.c src/ime.c
 
-test: build/doc_test build/page_test build/chrome_test build/ime_test
+build/html_test: src/html.c src/html_test.c src/html.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/html_test.c src/html.c
+
+test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test
 	./build/doc_test
 	./build/page_test
 	./build/chrome_test
 	./build/ime_test
+	./build/html_test
 
 build/obj/%/chrome.o: src/chrome.c src/chrome.h
 	mkdir -p $(dir $@)
@@ -54,7 +59,7 @@ build/obj/%/ime.o: src/ime.c src/ime.h src/utf8.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/ime.c
 
-build/obj/%/main.o: src/main.c src/page.h src/doc.h src/chrome.h src/ime.h src/utf8.h
+build/obj/%/main.o: src/main.c src/page.h src/doc.h src/chrome.h src/ime.h src/html.h src/utf8.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/main.c
 
@@ -70,7 +75,11 @@ build/obj/%/glue.o: $(GLUE)/android_native_app_glue.c
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(GLUE_CFLAGS) -c -o $@ $(GLUE)/android_native_app_glue.c
 
-build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/glue.o
+build/obj/%/html.o: src/html.c src/html.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/html.c
+
+build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/glue.o
 	@test -n "$(NDK)" || (echo "NDK not found under $(ANDROID_HOME)/ndk" && exit 1)
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(LDFLAGS) -o $@ $^
@@ -81,10 +90,7 @@ triple = $(if $(filter arm64-v8a,$1),aarch64-linux-android$(MIN_SDK),$(if $(filt
 build/dex/classes.dex: android/Keyboard.java android/Pen.java
 	mkdir -p build/classes build/dex
 	javac --release 8 -cp $(PLATFORM) -d build/classes android/Keyboard.java android/Pen.java
-	$(BUILD_TOOLS)/d8 --min-api $(MIN_SDK) --output build/dex \
-		build/classes/penship/Keyboard.class build/classes/penship/Pen.class \
-		build/classes/penship/ImeView.class build/classes/penship/PenInput.class \
-		build/classes/penship/Clip.class
+	$(BUILD_TOOLS)/d8 --min-api $(MIN_SDK) --output build/dex build/classes/penship/*.class
 
 build/compiled-res.zip: android/res/mipmap-mdpi/ic_launcher.png android/res/mipmap-hdpi/ic_launcher.png \
 		android/res/mipmap-xhdpi/ic_launcher.png android/res/mipmap-xxhdpi/ic_launcher.png \
