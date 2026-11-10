@@ -139,6 +139,48 @@ static void test_hit(const unsigned char *font, int font_len) {
     free(px);
 }
 
+/* The stars are hidden on a rendered line, so a tap has to land on the letter. */
+static void test_hit_rendered_mark(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "rendered hit font");
+    page_set_readonly(0);
+    page_set_source(0);
+    page_set_typewriter(0);
+    page_set_follow(0);
+    const int width = 480;
+    const int height = 320;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    const char *text = "plain\n**Hi**\n";
+    size_t n = strlen(text);
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "rendered hit buffer");
+    if (px == NULL) {
+        return;
+    }
+    page_draw(px, width, height, 0, 0, width, height, text, n, 0, 0, font_px);
+    int y = -1;
+    int gap = 0;
+    for (int row = margin + font_px; row < height; row++) {
+        if (ink_at(px, width, margin + 4, row)) {
+            if (gap > 4) {
+                y = row + 2;
+                break;
+            }
+        } else if (y < 0) {
+            gap++;
+        }
+    }
+    expect(y > margin, "the strong word is on the next line");
+    size_t at = page_hit(0, 0, width, height, text, n, 0, font_px, margin + 4, y);
+    expect(at == 8, "a tap on a rendered strong word hits the letter");
+    page_set_line(1);
+    page_draw(px, width, height, 0, 0, width, height, "Hello", 5, 0, 0, font_px);
+    const uint8_t *band = px + ((size_t)(margin + 4) * (size_t)width + 2u) * 4;
+    expect(band[0] < PAGE_PAPER_R && band[0] >= band[2], "the caret line is a warm band, not a selection");
+    page_set_line(0);
+    free(px);
+}
+
 static int ink_rows(const uint8_t *px, int width, int y0, int y1) {
     int n = 0;
     for (int y = y0; y < y1; y++) {
@@ -984,6 +1026,7 @@ int main(void) {
     if (font != NULL) {
         test_caret_and_glyph(font, font_len);
         test_hit(font, font_len);
+        test_hit_rendered_mark(font, font_len);
         test_user_scroll(font, font_len);
         test_markdown(font, font_len);
         test_rendered(font, font_len);

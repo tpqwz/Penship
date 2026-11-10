@@ -990,6 +990,23 @@ int doc_word_at(const char *text, size_t len, size_t byte_off, size_t *lo, size_
     return 0;
 }
 
+int doc_select_word(Doc *doc) {
+    if (doc == NULL || doc->bytes == NULL) {
+        return -1;
+    }
+    if (doc->caret != doc->anchor) {
+        return 0;
+    }
+    size_t lo = 0;
+    size_t hi = 0;
+    if (doc_word_at(doc->bytes, doc->len, doc->caret, &lo, &hi) != 0) {
+        return -1;
+    }
+    doc->anchor = lo;
+    doc->caret = hi;
+    return 0;
+}
+
 int doc_backspace(Doc *doc) {
     size_t lo = 0;
     size_t hi = 0;

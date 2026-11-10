@@ -40,7 +40,9 @@ static void test_phone(void) {
     expect(chrome.vertical == 0, "the writing surface is not a column of options");
     expect(chrome.text_w == width, "the page uses the full width");
     expect(chrome.w[CHROME_BOLD] == 0, "the reading page has no format row");
-    expect(chrome.text_y >= chrome.y[CHROME_SETTINGS] + chrome.h[CHROME_SETTINGS], "the column starts below the menu mark");
+    expect(chrome.text_y == 80, "the column starts at the status inset");
+    expect(chrome.text_h == height - 80 - 160, "the column fills the space between the insets");
+    expect(chrome.y[CHROME_SETTINGS] < chrome.text_y + chrome.text_h, "the menu mark floats on the column");
     chrome_place(&chrome, width, height, 80, 160, density, 0, 1000, NULL, NULL, 1);
     expect(chrome.h[CHROME_BOLD] >= thumb_of(density), "the formatting row is a thumb tall");
     expect(chrome.w[CHROME_BOLD] == thumb_of(density), "a format cell is a thumb wide");
@@ -104,8 +106,10 @@ static void test_settings_view(void) {
     expect(chrome.y[CHROME_FIND] > chrome.y[CHROME_CONTENTS], "find sits under contents");
     expect(strcmp(chrome_label(CHROME_FIND), "Find") == 0, "find label");
     expect(chrome.y[CHROME_OPTIONS] > chrome.y[CHROME_FIND], "settings sits under find");
-    expect(chrome.y[CHROME_OPEN] >= chrome.y[CHROME_SETTINGS] + chrome.h[CHROME_SETTINGS],
-           "the menu list starts below the mark");
+    expect(chrome.y[CHROME_OPEN] == 80, "the menu list starts at the status inset");
+    expect(chrome_hit(&chrome, chrome.x[CHROME_SETTINGS] + chrome.w[CHROME_SETTINGS] / 2,
+                      chrome.y[CHROME_SETTINGS] + chrome.h[CHROME_SETTINGS] / 2) == CHROME_SETTINGS,
+           "a tap on the mark is the mark where a row passes under it");
     expect(strcmp(chrome_label(CHROME_OPTIONS), "Settings") == 0, "settings label");
     expect(chrome.w[CHROME_SMALLER] == 0 && chrome.w[CHROME_FONT] == 0, "preferences wait on their own screen");
     expect(chrome.w[CHROME_BOLD] == 0 && chrome.w[CHROME_CODE] == 0, "the formatting bar waits for the page");
@@ -138,13 +142,13 @@ static void test_wide(void) {
     expect(chrome.text_x > 0 && chrome.text_w < width, "a wide page keeps a reading measure");
     expect(chrome.text_x + chrome.text_w / 2 > width / 2 - 2 && chrome.text_x + chrome.text_w / 2 < width / 2 + 2,
            "the wide measure sits in the middle");
-    expect(chrome.text_h < height - 40 - 40, "a wide reading page leaves room for the menu mark");
+    expect(chrome.text_h == height - 40 - 40, "a wide reading page fills the space between the insets");
     expect(chrome.w[CHROME_BOLD] == 0, "a wide reading page hides the format row");
     expect_placed(&chrome, CHROME_SETTINGS, width, height);
     expect(chrome.w[CHROME_SETTINGS] < width / 4, "the menu does not become a bar");
     expect(chrome.y[CHROME_SETTINGS] <= 40 + thumb_of(density), "the wide menu sits under the status inset");
     expect(chrome.w[CHROME_THEME] == 0, "wide writing hides the options");
-    expect(chrome.text_y > 40, "the page starts below the menu mark");
+    expect(chrome.text_y == 40, "the page starts at the status inset");
     chrome_place(&chrome, width, height, 40, 40, density, 0, 1000, NULL, NULL, 1);
     expect(chrome.w[CHROME_BOLD] > thumb_of(density), "a wide bar gives each mark more than a thumb");
     expect(chrome.x[CHROME_BLOCK] + chrome.w[CHROME_BLOCK] == width, "a wide bar ends with the block mark");

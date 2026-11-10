@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1624,7 +1625,7 @@ static void glide_note(struct App *app, int y) {
     app->glide_n++;
 }
 
-/* Pixels per millisecond over the last 80ms of the finger, not the last sample alone. */
+/* Pixels per millisecond. The fast part of the flick counts, not the slow lift at the end. */
 static float glide_speed(const struct App *app) {
     if (app->glide_n < 2) {
         return 0.f;
@@ -1632,14 +1633,71 @@ static float glide_speed(const struct App *app) {
     int last = app->glide_n - 1;
     int64_t end = app->glide_ms[last];
     int first = last;
-    while (first > 0 && end - app->glide_ms[first - 1] <= 80) {
+    while (first > 0 && end - app->glide_ms[first - 1] <= 120) {
         first--;
     }
-    int64_t dt = end - app->glide_ms[first];
-    if (dt < 8) {
-        return 0.f;
+    float peak = 0.f;
+    for (int i = first; i < last; i++) {
+        int64_t step = app->glide_ms[i + 1] - app->glide_ms[i];
+        if (step < 4) {
+            continue;
+        }
+        float v = (float)(app->glide_y[i] - app->glide_y[i + 1]) / (float)step;
+        float abs_v = v < 0.f ? -v : v;
+        float abs_peak = peak < 0.f ? -peak : peak;
+        if (abs_v > abs_peak) {
+            peak = v;
+        }
     }
-    return (float)(app->glide_y[first] - app->glide_y[last]) / (float)dt;
+    int64_t dt = end - app->glide_ms[first];
+    float window = 0.f;
+    if (dt >= 8) {
+        window = (float)(app->glide_y[first] - app->glide_y[last]) / (float)dt;
+    }
+    float abs_peak = peak < 0.f ? -peak : peak;
+    float abs_window = window < 0.f ? -window : window;
+    int same_way = peak == 0.f || window == 0.f || (peak > 0.f) == (window > 0.f);
+    if (same_way && abs_peak >= abs_window) {
+        return peak;
+    }
+    return window;
+}
+
+static float screen_dpi(const struct App *app) {
+    float dpi = 160.f;
+    if (app->android != NULL && app->android->config != NULL) {
+        int density = AConfiguration_getDensity(app->android->config);
+        if (density >= 120 && density <= 1000) {
+            dpi = (float)density;
+        }
+    }
+    return dpi;
+}
+
+/* The emulator reports a phone density while the mouse moves in host pixels.
+   A wheel tick on a long page is a stack of dips, so a drag here is judged in dips. */
+static int emulator_pointer(void) {
+    static int known = 0;
+    static int yes = 0;
+    char value[PROP_VALUE_MAX];
+    int n = 0;
+    if (known) {
+        return yes;
+    }
+    value[0] = '\0';
+    n = __system_property_get("ro.kernel.qemu", value);
+    if (n > 0 && value[0] == '1' && value[1] == '\0') {
+        yes = 1;
+    }
+    if (!yes) {
+        value[0] = '\0';
+        n = __system_property_get("ro.boot.qemu", value);
+        if (n > 0 && value[0] == '1' && value[1] == '\0') {
+            yes = 1;
+        }
+    }
+    known = 1;
+    return yes;
 }
 
 static int on_input(struct android_app *android, AInputEvent *event) {
@@ -1652,6 +1710,42 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         int action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
         int x = (int)AMotionEvent_getX(event, 0);
         int y = (int)AMotionEvent_getY(event, 0);
+        if (action == AMOTION_EVENT_ACTION_SCROLL) {
+            float ticks = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_VSCROLL, 0);
+            if (ticks > -0.01f && ticks < 0.01f) {
+                return 1;
+            }
+            float dpi = screen_dpi(app);
+            float pixels = ticks * 64.f * dpi / 160.f;
+            if (pixels > 4000.f) {
+                pixels = 4000.f;
+            }
+            if (pixels < -4000.f) {
+                pixels = -4000.f;
+            }
+            /* A positive tick moves the content down, toward the start of the note. */
+            int dy = (int)(-pixels);
+            page_fling_cancel();
+            app->glide = 0;
+            app->glide_carry = 0.f;
+            if (app->settings) {
+                int *scroll = app->contents ? &app->contents_scroll : &app->menu_scroll;
+                *scroll += dy;
+                render(app);
+                return 1;
+            }
+            int rows = page_center_drag(dy);
+            if (rows != 0) {
+                int step = rows > 0 ? 1 : -1;
+                int n = rows > 0 ? rows : -rows;
+                for (int i = 0; i < n && i < 8; i++) {
+                    doc_move_row(app->doc, step);
+                }
+                app->compose_n = 0;
+            }
+            render(app);
+            return 1;
+        }
         if (action == AMOTION_EVENT_ACTION_DOWN) {
             /* Pause the slide, but keep its speed so a flick in the same direction can add to it. */
             app->glide = 0;
@@ -1859,12 +1953,9 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 glide_note(app, y);
                 float flick = glide_speed(app) * 1000.f * page_glide_gain();
                 if (flick > 200.f || flick < -200.f) {
-                    float dpi = 160.f;
-                    if (app->android != NULL && app->android->config != NULL) {
-                        int density = AConfiguration_getDensity(app->android->config);
-                        if (density >= 120 && density <= 1000) {
-                            dpi = (float)density;
-                        }
+                    float dpi = screen_dpi(app);
+                    if (emulator_pointer() && dpi > 160.f) {
+                        flick *= dpi / 160.f;
                     }
                     float v = app->glide_carry + flick;
                     if (v > 30000.f) {
@@ -1906,11 +1997,14 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             }
             int chosen = sel_row(app, x, y);
             if (app->sel_menu && chosen < 0) {
+                int mark_hit = chrome_hit(&app->chrome, x, y);
                 app->sel_menu = 0;
-                app->tap_pending = 0;
-                app->tap_at = 0;
-                render(app);
-                return 1;
+                if (mark_hit < CHROME_BOLD || mark_hit > CHROME_BLOCK) {
+                    app->tap_pending = 0;
+                    app->tap_at = 0;
+                    render(app);
+                    return 1;
+                }
             }
             if (chosen >= 0) {
                 app->tap_pending = 0;
@@ -2084,6 +2178,10 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                     hide_keyboard(app);
                 }
             } else if (!page_readonly() && hit >= CHROME_BOLD && hit <= CHROME_BLOCK) {
+                if (hit == CHROME_BOLD || hit == CHROME_ITALIC || hit == CHROME_STRIKE || hit == CHROME_CODE ||
+                    hit == CHROME_LINK) {
+                    doc_select_word(app->doc);
+                }
                 if (hit == CHROME_BOLD) {
                     doc_mark(app->doc, "**", 2);
                 } else if (hit == CHROME_ITALIC) {

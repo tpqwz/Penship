@@ -207,17 +207,9 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         const int *rows = screen == 2 ? k_options : k_menu;
         int n = screen == 2 ? (int)(sizeof k_options / sizeof k_options[0]) : (int)(sizeof k_menu / sizeof k_menu[0]);
         place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
-        int mark_gap = chrome->h[CHROME_SETTINGS] * 618 / 1000;
-        if (mark_gap < 8) {
-            mark_gap = 8;
-        }
-        int top = chrome->y[CHROME_SETTINGS] + chrome->h[CHROME_SETTINGS] + mark_gap;
-        int list_inner = height - inset_bottom - top;
-        if (list_inner < 1) {
-            list_inner = 1;
-        }
+        /* The mark floats on the first rows. The list is not pushed down to clear it. */
         int row = chrome_row_px(density, scale_milli);
-        place_column(chrome, rows, n, width, top, list_inner, thumb, row, scroll);
+        place_column(chrome, rows, n, width, inset_top, inner, thumb, row, scroll);
         chrome->text_x = 0;
         chrome->text_y = 0;
         chrome->text_w = 1;
@@ -225,8 +217,6 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         return;
     }
     place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
-    int side = chrome->h[CHROME_SETTINGS];
-    int y = chrome->y[CHROME_SETTINGS];
     int text_h = inner;
     if (editing && width >= 4 && inner > thumb * 2) {
         int by = height - inset_bottom - thumb;
@@ -285,16 +275,6 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
             text_h = 1;
         }
     }
-    int mark_gap = side * 618 / 1000;
-    if (mark_gap < 8) {
-        mark_gap = 8;
-    }
-    int below_mark = y + side + mark_gap;
-    if (below_mark > inset_top && text_h > below_mark - inset_top + 1) {
-        text_h -= below_mark - inset_top;
-    } else {
-        below_mark = inset_top;
-    }
     int body = text_px(density, text_step_default());
     int measure = body > INT_MAX / 30 ? width : body * 30;
     if (measure > width) {
@@ -304,7 +284,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         measure = 1;
     }
     chrome->text_x = (width - measure) / 2;
-    chrome->text_y = below_mark;
+    chrome->text_y = inset_top;
     chrome->text_w = measure;
     chrome->text_h = text_h;
 }
@@ -352,6 +332,12 @@ int chrome_stack(int *ys, int *hs, int n, int top, int bottom, int row_h, int *s
 int chrome_hit(const struct Chrome *chrome, int x, int y) {
     if (chrome == NULL) {
         return -1;
+    }
+    /* The mark floats on top of the column and the first rows. It wins the tap. */
+    if (chrome->w[CHROME_SETTINGS] > 0 && chrome->h[CHROME_SETTINGS] > 0 && x >= chrome->x[CHROME_SETTINGS] &&
+        y >= chrome->y[CHROME_SETTINGS] && x < chrome->x[CHROME_SETTINGS] + chrome->w[CHROME_SETTINGS] &&
+        y < chrome->y[CHROME_SETTINGS] + chrome->h[CHROME_SETTINGS]) {
+        return CHROME_SETTINGS;
     }
     for (int i = 0; i < CHROME_COUNT; i++) {
         if (chrome->w[i] <= 0 || chrome->h[i] <= 0) {

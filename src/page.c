@@ -330,8 +330,85 @@ int page_theme(void) {
     return g_theme;
 }
 
+enum { GLYPH_CACHE = 128 };
+
+struct GlyphBit {
+    unsigned cp;
+    int scale_milli;
+    int gw;
+    int gh;
+    unsigned char *alpha;
+};
+
+static struct GlyphBit g_glyph[GLYPH_CACHE];
+
+static void glyph_cache_clear(void) {
+    for (int i = 0; i < GLYPH_CACHE; i++) {
+        free(g_glyph[i].alpha);
+        g_glyph[i].alpha = NULL;
+        g_glyph[i].cp = 0;
+        g_glyph[i].scale_milli = 0;
+        g_glyph[i].gw = 0;
+        g_glyph[i].gh = 0;
+    }
+}
+
+/* The same letters are rasterized on every glide frame. Keep the small ones. */
+static const unsigned char *glyph_bits(unsigned cp, float scale, int *x0, int *y0, int *gw, int *gh,
+                                       unsigned char *scratch, int scratch_n) {
+    int x_0 = 0;
+    int y_0 = 0;
+    int x_1 = 0;
+    int y_1 = 0;
+    stbtt_GetCodepointBitmapBox(&g_font, (int)cp, scale, scale, &x_0, &y_0, &x_1, &y_1);
+    int w = x_1 - x_0;
+    int h = y_1 - y_0;
+    *x0 = x_0;
+    *y0 = y_0;
+    *gw = w;
+    *gh = h;
+    if (w <= 0 || h <= 0 || w > 256 || h > 256) {
+        return NULL;
+    }
+    size_t bytes = (size_t)w * (size_t)h;
+    int milli = 0;
+    if (scale > 0.f && scale < 100.f) {
+        float scaled = scale * 1000.f;
+        if (scaled < 1000000.f) {
+            milli = (int)(scaled + 0.5f);
+        }
+    }
+    if (milli > 0 && bytes <= 48u * 48u) {
+        unsigned start = (cp * 131u + (unsigned)milli) % (unsigned)GLYPH_CACHE;
+        for (unsigned n = 0; n < 4u; n++) {
+            struct GlyphBit *hit = &g_glyph[(start + n) % (unsigned)GLYPH_CACHE];
+            if (hit->alpha != NULL && hit->cp == cp && hit->scale_milli == milli && hit->gw == w && hit->gh == h) {
+                return hit->alpha;
+            }
+        }
+        unsigned char *born = malloc(bytes);
+        if (born != NULL) {
+            stbtt_MakeCodepointBitmap(&g_font, born, w, h, w, scale, scale, (int)cp);
+            struct GlyphBit *slot = &g_glyph[start];
+            free(slot->alpha);
+            slot->alpha = born;
+            slot->cp = cp;
+            slot->scale_milli = milli;
+            slot->gw = w;
+            slot->gh = h;
+            return born;
+        }
+    }
+    if (scratch == NULL || scratch_n <= 0 || (size_t)scratch_n < bytes) {
+        return NULL;
+    }
+    stbtt_MakeCodepointBitmap(&g_font, scratch, w, h, w, scale, scale, (int)cp);
+    return scratch;
+}
+
 int page_set_font(const unsigned char *ttf, int len) {
     g_font_ok = 0;
+    glyph_cache_clear();
     if (ttf == NULL || len <= 0) {
         return -1;
     }
@@ -1471,9 +1548,9 @@ static void paint_caret_band(uint8_t *px, int width, int height, uint32_t row, u
     int sr = 0;
     int sg = 0;
     int sb = 0;
-    slot_rgb(SLOT_SEL, &sr, &sg, &sb);
-    /* 72/255 of the selection color. Glyphs are drawn after this, so the letters stay visible. */
-    blend_rect(px, width, height, g_view_x, sy, g_view_w, line_h, sr, sg, sb, 72);
+    slot_rgb(SLOT_INK, &sr, &sg, &sb);
+    /* A warm wash, not the selection color, so a real selection stays distinct. */
+    blend_rect(px, width, height, g_view_x, sy, g_view_w, line_h, sr, sg, sb, 18);
 }
 
 static uint32_t layout_line(uint8_t *px, int width, int height, const char *text, size_t off, size_t len,
@@ -1606,12 +1683,10 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         }
         i += (size_t)n;
         if (!source && hide > 0 && at < off + hide) {
-            consider(at, x, (int)row);
             continue;
         }
         if (!source && mark != NULL && at >= off && (size_t)(at - off) < len &&
             ((mark[at - off] == KIND_STRIKE && text[at] == '~') || mark[at - off] == KIND_SKIP)) {
-            consider(at, x, (int)row);
             continue;
         }
         long long advance = space_px;
@@ -1674,13 +1749,13 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             }
         }
         if (draw && on_screen && glyph && px != NULL) {
-            int x0, y0, x1, y1;
-            stbtt_GetCodepointBitmapBox(&g_font, (int)cp, scale, scale, &x0, &y0, &x1, &y1);
-            int gw = x1 - x0;
-            int gh = y1 - y0;
-            if (gw > 0 && gh > 0 && gw <= 256 && gh <= 256) {
-                unsigned char bitmap[256 * 256];
-                stbtt_MakeCodepointBitmap(&g_font, bitmap, gw, gh, gw, scale, scale, (int)cp);
+            int x0 = 0;
+            int y0 = 0;
+            int gw = 0;
+            int gh = 0;
+            unsigned char scratch[256 * 256];
+            const unsigned char *bitmap = glyph_bits(cp, scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
+            if (bitmap != NULL) {
                 int sy = screen_row(row_y, scroll, origin_y);
                 int cr, cg, cb;
                 color_of(kind, &cr, &cg, &cb);
@@ -2959,6 +3034,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     if (caret > text_len) {
         caret = text_len;
     }
+    gather_refs(text, text_len);
     if (font_px < 8) {
         font_px = 8;
     }
@@ -3041,6 +3117,16 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     }
     struct Line line = idx.lines[li];
     int source = line_is_source(&idx, li, caret_li);
+    uint8_t *mark = NULL;
+    const uint8_t *marks = NULL;
+    if (!source && line.kind == KIND_BODY && line.content > 0 && line.content <= (1u << 18)) {
+        mark = malloc(line.content);
+        if (mark != NULL) {
+            mark_inline(text + line.off, line.content, mark);
+            mark_block(text + line.off, line.content, mark);
+            marks = mark;
+        }
+    }
     uint64_t into = doc_y >= line_y ? doc_y - line_y : 0;
     int use_h = line_h;
     float use_scale = scale;
@@ -3059,9 +3145,10 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     int cx = 0;
     int crow = 0;
     layout_line(NULL, 0, 0, text, line.off, line.content, caret, origin_x, max_x, origin_y, use_h, 0, space_px,
-                use_scale, 0, line_y, scroll, view_h, 0, 0, source, NULL, line.kind, &cx, &crow);
+                use_scale, 0, line_y, scroll, view_h, 0, 0, source, marks, line.kind, &cx, &crow);
     g_seek = 0;
     size_t at = g_seek_at;
+    free(mark);
     free(idx.lines);
     if (at > text_len) {
         at = text_len;
@@ -3136,13 +3223,14 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
             if (x + advance > x0 + cell_w) {
                 break;
             }
-            int gx0, gy0, gx1, gy1;
-            stbtt_GetCodepointBitmapBox(&g_font, *p, scale, scale, &gx0, &gy0, &gx1, &gy1);
-            int gw = gx1 - gx0;
-            int gh = gy1 - gy0;
-            if (gw > 0 && gh > 0 && gw <= 128 && gh <= 128) {
-                unsigned char bitmap[128 * 128];
-                stbtt_MakeCodepointBitmap(&g_font, bitmap, gw, gh, gw, scale, scale, *p);
+            int gx0 = 0;
+            int gy0 = 0;
+            int gw = 0;
+            int gh = 0;
+            unsigned char scratch[128 * 128];
+            const unsigned char *bitmap =
+                glyph_bits((unsigned)*p, scale, &gx0, &gy0, &gw, &gh, scratch, (int)sizeof scratch);
+            if (bitmap != NULL && gw <= 128 && gh <= 128) {
                 for (int by = 0; by < gh; by++) {
                     for (int bx = 0; bx < gw; bx++) {
                         int xx = x + gx0 + bx;

@@ -396,6 +396,12 @@ static void test_mark(void) {
     doc_place(doc, 2);
     expect(doc_mark(doc, "~~", 2) == 0, "an empty selection inserts strike marks");
     expect(strcmp(doc_text(doc, NULL), "go~~~~") == 0 && doc_caret(doc) == 4, "the caret sits between the marks");
+    expect(doc_load_bytes(doc, "say hello now", 14) == 0, "seed a sentence");
+    doc_place(doc, 6);
+    expect(doc_select_word(doc) == 0, "the caret takes the word");
+    expect(doc_anchor(doc) == 4 && doc_caret(doc) == 9, "hello is the selected word");
+    expect(doc_mark(doc, "**", 2) == 0, "bold wraps that word");
+    expect(strcmp(doc_text(doc, NULL), "say **hello** now") == 0, "bold does not split the word");
     doc_free(doc);
 }
 

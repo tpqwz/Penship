@@ -38,6 +38,9 @@ int doc_block(Doc *doc, int kind);
    Returns 0 and sets [lo, hi), or -1 when byte_off is not in a word. */
 int doc_word_at(const char *text, size_t len, size_t byte_off, size_t *lo, size_t *hi);
 
+/* If nothing is selected, select the word around the caret. Returns 0, or -1 when the caret is not in a word. */
+int doc_select_word(Doc *doc);
+
 /* Delete the selection, or the code point before the caret. Returns 0, or -1 if nothing can be deleted. */
 int doc_backspace(Doc *doc);
 
