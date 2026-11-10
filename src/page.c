@@ -344,19 +344,20 @@ int page_set_font(const unsigned char *ttf, int len) {
 }
 
 int page_margin(int font_px) {
-    int margin = font_px;
+    /* The minor of the em. One em of margin is the major; this is the rest. */
+    int margin = font_px * 1000 / 1618;
     if (margin < 12) {
         margin = 12;
     }
     return margin;
 }
 
-/* A sixth of the font line, so the page has room between rows. */
+/* The gap under a row is the square of the golden minor, so the line box stays airy without doubling. */
 static int with_lead(int line_h) {
     if (line_h < 1) {
         return 1;
     }
-    int lead = line_h / 6;
+    int lead = line_h * 382 / 1000;
     if (lead < 1) {
         lead = 1;
     }
@@ -2715,7 +2716,7 @@ static void paint_scrollbar(uint8_t *px, int width, int height, int box_x, int t
         top = (int)(scroll * (uint64_t)travel / max_scroll);
     }
     int thick = 4;
-    int x = box_x + box_w - thick - 4;
+    int x = box_x + box_w - thick - thick;
     if (x < 0) {
         return;
     }
@@ -2723,7 +2724,23 @@ static void paint_scrollbar(uint8_t *px, int width, int height, int box_x, int t
     int g = 0;
     int b = 0;
     slot_rgb(SLOT_INK, &r, &g, &b);
-    blend_rect(px, width, height, x, track_y + top, thick, thumb, r, g, b, 110);
+    int ty = track_y + top;
+    int rad = thick / 2;
+    if (thumb <= thick) {
+        blend_rect(px, width, height, x, ty, thick, thumb, r, g, b, 96);
+        return;
+    }
+    blend_rect(px, width, height, x, ty + rad, thick, thumb - thick, r, g, b, 96);
+    for (int yy = 0; yy < rad; yy++) {
+        for (int xx = 0; xx < thick; xx++) {
+            int dx = xx - rad;
+            int dy = yy - rad;
+            if (dx * dx + dy * dy <= rad * rad) {
+                blend(px, width, height, x + xx, ty + yy, 96, r, g, b);
+                blend(px, width, height, x + xx, ty + thumb - 1 - yy, 96, r, g, b);
+            }
+        }
+    }
 }
 
 void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box_w, int box_h,
@@ -2895,6 +2912,9 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
     g_dim = 0;
     paint_scrollbar(px, width, height, box_x, origin_y, box_w, view_h, scroll, g_span);
     free(idx.lines);
+    if (view_h < 8 || box_w < 8) {
+        return;
+    }
 
     uint64_t rel = idx.caret_y - scroll;
     int caret_sy = origin_y;
@@ -2909,9 +2929,12 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
     g_bar_h = line_h;
     solid_bar(px, width, height, idx.caret_x, caret_sy, 2, line_h);
     if (g_sel_ok && sel_hi > sel_lo) {
-        int grip = line_h / 5;
+        int grip = line_h / 8;
         if (grip < 3) {
             grip = 3;
+        }
+        if (grip > 8) {
+            grip = 8;
         }
         int extra = line_h / 4;
         int cr, cg, cb;
@@ -3078,20 +3101,26 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
         if (s[0] == '\0') {
             continue;
         }
+        int trim = font_px * 618 / 1000;
+        if (trim < 8) {
+            trim = 8;
+        }
         if (vertical) {
-            for (int row = 0; row < cell_h; row++) {
+            int y_end = cell_h - trim;
+            for (int row = trim; row < y_end; row++) {
                 int yy = y0 + row;
                 if (yy < clip_top || yy >= clip_bottom) {
                     continue;
                 }
-                blend(px, width, height, x0 + cell_w - 1, yy, 255, ir, ig, ib);
+                blend(px, width, height, x0 + cell_w - 1, yy, 56, ir, ig, ib);
             }
         } else if (y0 >= clip_top && y0 < clip_bottom) {
-            for (int col = 0; col < cell_w; col++) {
-                blend(px, width, height, x0 + col, y0, 255, ir, ig, ib);
+            int x_end = cell_w - trim;
+            for (int col = trim; col < x_end; col++) {
+                blend(px, width, height, x0 + col, y0, 56, ir, ig, ib);
             }
         }
-        int x = x0 + font_px / 3;
+        int x = x0 + font_px * 618 / 1000;
         int y = y0 + (cell_h - line_h) / 2;
         if (y < y0) {
             y = y0;
@@ -3338,7 +3367,7 @@ void page_draw_tool(uint8_t *px, int width, int height, int x, int y, int w, int
     slot_rgb(SLOT_RULE, &hr, &hg, &hb);
     blend_rect(px, width, height, x, y, w, 1, hr, hg, hb, 140);
     int room = w < h ? w : h;
-    int side = room * 22 / 48;
+    int side = room * 1000 / 1618;
     if (side < 16) {
         side = 16;
     }

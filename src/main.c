@@ -1905,6 +1905,13 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 return 1;
             }
             int chosen = sel_row(app, x, y);
+            if (app->sel_menu && chosen < 0) {
+                app->sel_menu = 0;
+                app->tap_pending = 0;
+                app->tap_at = 0;
+                render(app);
+                return 1;
+            }
             if (chosen >= 0) {
                 app->tap_pending = 0;
                 app->tap_at = 0;
@@ -1943,7 +1950,12 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                         break;
                     }
                 }
-                if (row == 0) {
+                if (row < 0) {
+                    app->settings = 0;
+                    app->options = 0;
+                    app->contents = 0;
+                    app->menu_scroll = 0;
+                } else if (row == 0) {
                     app->contents = 0;
                     app->contents_scroll = 0;
                 } else if (row > 0 && app->head_n > 0 && row - 1 < app->head_n && row - 1 < PAGE_HEADS_MAX) {
@@ -1961,12 +1973,19 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 app->tap_at = 0;
             }
             if (hit == CHROME_SETTINGS) {
-                app->settings = 1;
-                app->options = 0;
-                app->contents = 0;
-                app->menu_scroll = 0;
-                hide_keyboard(app);
-                claim_back(app);
+                if (app->settings) {
+                    app->settings = 0;
+                    app->options = 0;
+                    app->contents = 0;
+                    app->menu_scroll = 0;
+                } else {
+                    app->settings = 1;
+                    app->options = 0;
+                    app->contents = 0;
+                    app->menu_scroll = 0;
+                    hide_keyboard(app);
+                    claim_back(app);
+                }
             } else if (hit == CHROME_OPTIONS) {
                 app->options = 1;
                 app->menu_scroll = 0;
@@ -2022,16 +2041,11 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                     }
                 }
                 free(html);
-            } else if (hit == CHROME_DONE) {
-                if (app->options) {
-                    app->options = 0;
-                    app->menu_scroll = 0;
-                } else {
-                    app->settings = 0;
-                    app->options = 0;
-                    app->contents = 0;
-                }
             } else if (app->settings && hit < 0) {
+                app->settings = 0;
+                app->options = 0;
+                app->contents = 0;
+                app->menu_scroll = 0;
                 render(app);
                 return 1;
             } else if (hit == CHROME_SMALLER && app->step > 0) {

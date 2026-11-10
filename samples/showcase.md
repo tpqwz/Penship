@@ -135,7 +135,7 @@ Settings is its own screen. The format bar stays on the page. Settings opens thi
 - Theme switches the day paper and the night paper.
 - Source shows every mark, on every line, and leaves Read only.
 - Read only paints the whole note and ignores typing, backspace, and the format row.
-- Done returns to the page. Back closes Contents, then the menu, then the keyboard, and it does not leave the note.
+- The menu mark closes the list and returns to the note. Back closes Contents, then the menu, then the keyboard, and it does not leave the note.
 
 Ctrl+Shift+T, Ctrl+Shift+F, Ctrl+Shift+P, and Ctrl+Shift+S still flip Typewriter, Focus, Theme, and Source when those keys reach the editor.
 
@@ -181,7 +181,7 @@ Four. A drag that starts on the caret selects. Press and hold, then drag, select
 
 Five. Copy and paste go through the Android clipboard. A clip longer than a mebibyte is ignored, so a huge paste cannot replace the note by accident. Cut copies first and deletes only when the copy succeeded. In Read only, Cut and Paste do nothing to the buffer. The words can still be copied. Undo is refused there too, because undo is an edit.
 
-Six. The menu is the file: Open, Save, Save as, Export, Contents, Find, and Settings. Settings is the other screen: Smaller, Larger, Font, Typewriter, Focus, Line, Theme, Source, and Read only. The labels are large enough to read on a phone, and each row is at least a thumb tall. If the keyboard would cover the bottom of the list, the list scrolls. Opening the menu hides the keyboard. Done on Settings returns to the menu. Done on the menu returns to the page. Back follows that same path. A later Back hides the keyboard and stays in penship.
+Six. The menu is the file: Open, Save, Save as, Export, Contents, Find, and Settings. Settings is the other screen: Smaller, Larger, Font, Typewriter, Focus, Line, Theme, Source, and Read only. The labels are large enough to read on a phone, and each row is at least a thumb tall. If the keyboard would cover the bottom of the list, the list scrolls. Opening the menu hides the keyboard. The menu mark closes the list and returns to the note. Back closes Contents, then Settings, then the menu, then the keyboard, and stays in penship.
 
 Seven. That menu opens Open, Save, Save as, Export, and Contents, and the same options on a phone and on a wide window. Save writes the open file. If the note is still the private scratch file, or the open file cannot be written, Save asks the system for a place. Save as always asks, and the note becomes the file you pick. Export writes HTML from this buffer and does not replace the markdown you are editing. Contents lists the headings outside fences, up to sixty-four of them, and a tap moves the caret to that heading.
 

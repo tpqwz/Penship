@@ -142,6 +142,34 @@ static void place_column(struct Chrome *chrome, const int *rows, int n, int widt
     }
 }
 
+/* The menu mark floats at the end, under the status inset. The keyboard covers the bottom. */
+static void place_mark(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int inner,
+                       int thumb) {
+    int side = thumb;
+    if (side > width) {
+        side = width;
+    }
+    if (side > inner) {
+        side = inner;
+    }
+    if (side < 1) {
+        side = 1;
+    }
+    int gap = side / 5;
+    int x = width - side - gap;
+    if (x < 0) {
+        x = 0;
+    }
+    int y = inset_top + gap;
+    if (y + side > height - inset_bottom && inset_top <= height - inset_bottom - side) {
+        y = height - inset_bottom - side;
+    }
+    if (y < inset_top) {
+        y = inset_top;
+    }
+    place_one(chrome, CHROME_SETTINGS, x, y, side, side);
+}
+
 void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int density,
                   int screen, int scale_milli, int *scroll, int *bar_scroll, int editing) {
     if (width < 1) {
@@ -171,45 +199,34 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
     }
     if (screen == 1 || screen == 2) {
         static const int k_menu[] = {CHROME_OPEN,   CHROME_SAVE,     CHROME_SAVE_AS, CHROME_EXPORT,
-                                    CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS, CHROME_DONE};
+                                    CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS};
         static const int k_options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,       CHROME_FONTFILE,
                                        CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_GLIDE,
                                        CHROME_THEME,
-                                       CHROME_SOURCE,  CHROME_READONLY, CHROME_DONE};
+                                       CHROME_SOURCE,  CHROME_READONLY};
         const int *rows = screen == 2 ? k_options : k_menu;
         int n = screen == 2 ? (int)(sizeof k_options / sizeof k_options[0]) : (int)(sizeof k_menu / sizeof k_menu[0]);
+        place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
+        int mark_gap = chrome->h[CHROME_SETTINGS] * 618 / 1000;
+        if (mark_gap < 8) {
+            mark_gap = 8;
+        }
+        int top = chrome->y[CHROME_SETTINGS] + chrome->h[CHROME_SETTINGS] + mark_gap;
+        int list_inner = height - inset_bottom - top;
+        if (list_inner < 1) {
+            list_inner = 1;
+        }
         int row = chrome_row_px(density, scale_milli);
-        place_column(chrome, rows, n, width, inset_top, inner, thumb, row, scroll);
+        place_column(chrome, rows, n, width, top, list_inner, thumb, row, scroll);
         chrome->text_x = 0;
         chrome->text_y = 0;
         chrome->text_w = 1;
         chrome->text_h = 1;
         return;
     }
-    /* The menu mark floats at the end, under the status inset. The keyboard covers the bottom. */
-    int side = thumb;
-    if (side > width) {
-        side = width;
-    }
-    if (side > inner) {
-        side = inner;
-    }
-    if (side < 1) {
-        side = 1;
-    }
-    int gap = side / 5;
-    int x = width - side - gap;
-    if (x < 0) {
-        x = 0;
-    }
-    int y = inset_top + gap;
-    if (y + side > height - inset_bottom && inset_top <= height - inset_bottom - side) {
-        y = height - inset_bottom - side;
-    }
-    if (y < inset_top) {
-        y = inset_top;
-    }
-    place_one(chrome, CHROME_SETTINGS, x, y, side, side);
+    place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
+    int side = chrome->h[CHROME_SETTINGS];
+    int y = chrome->y[CHROME_SETTINGS];
     int text_h = inner;
     if (editing && width >= 4 && inner > thumb * 2) {
         int by = height - inset_bottom - thumb;
@@ -259,10 +276,24 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
                 place_one(chrome, k_bar[i], i * col - at, by, col, thumb);
             }
         }
-        text_h = inner - thumb;
+        int air = thumb * 382 / 1000;
+        if (air < 8) {
+            air = 8;
+        }
+        text_h = inner - thumb - air;
         if (text_h < 1) {
             text_h = 1;
         }
+    }
+    int mark_gap = side * 618 / 1000;
+    if (mark_gap < 8) {
+        mark_gap = 8;
+    }
+    int below_mark = y + side + mark_gap;
+    if (below_mark > inset_top && text_h > below_mark - inset_top + 1) {
+        text_h -= below_mark - inset_top;
+    } else {
+        below_mark = inset_top;
     }
     int body = text_px(density, text_step_default());
     int measure = body > INT_MAX / 30 ? width : body * 30;
@@ -273,7 +304,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         measure = 1;
     }
     chrome->text_x = (width - measure) / 2;
-    chrome->text_y = inset_top;
+    chrome->text_y = below_mark;
     chrome->text_w = measure;
     chrome->text_h = text_h;
 }
