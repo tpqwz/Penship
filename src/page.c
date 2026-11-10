@@ -20,6 +20,10 @@ static int g_font_ok;
 static int g_typewriter;
 static int g_focus;
 static int g_line_hl;
+static int g_line_clip;
+static int g_sections = 1;
+static size_t g_view_at;
+static int g_view_ready;
 static int g_view_x;
 static int g_view_w;
 static int g_source;
@@ -149,6 +153,22 @@ void page_set_line(int on) {
 
 int page_line(void) {
     return g_line_hl;
+}
+
+void page_set_sections(int on) {
+    g_sections = on ? 1 : 0;
+}
+
+int page_sections(void) {
+    return g_sections;
+}
+
+size_t page_view_at(void) {
+    return g_view_at;
+}
+
+int page_view_ready(void) {
+    return g_view_ready;
 }
 
 void page_set_source(int on) {
@@ -820,6 +840,35 @@ static void head_store(struct PageHead *head, size_t at, int level, const char *
     }
 }
 
+int page_trail(const char *text, size_t len, size_t at, struct PageHead *trail, int cap) {
+    struct PageHead heads[PAGE_HEADS_MAX];
+    if (trail == NULL || cap <= 0) {
+        return 0;
+    }
+    if (cap > 6) {
+        cap = 6;
+    }
+    int n = page_heads(text, len, heads, PAGE_HEADS_MAX);
+    int depth = 0;
+    for (int i = 0; i < n; i++) {
+        if (heads[i].at > at) {
+            break;
+        }
+        int level = heads[i].level;
+        if (level < 1) {
+            level = 1;
+        }
+        while (depth > 0 && trail[depth - 1].level >= level) {
+            depth--;
+        }
+        if (depth < cap) {
+            trail[depth] = heads[i];
+            depth++;
+        }
+    }
+    return depth;
+}
+
 int page_heads(const char *text, size_t len, struct PageHead *heads, int cap) {
     if (heads == NULL || cap <= 0) {
         return 0;
@@ -990,9 +1039,13 @@ static void mark_tables(const char *text, struct Index *idx) {
         }
         head->kind = KIND_TABLE;
         delim->kind = KIND_TABLE;
+        /* One painted row per source row. The delimiter is only the rule under the header. */
+        head->rows = 1;
+        delim->rows = 0;
         size_t j = i + 2;
         while (j < idx->n && idx->lines[j].kind != KIND_CODE && line_has_pipe(text + idx->lines[j].off, idx->lines[j].content)) {
             idx->lines[j].kind = KIND_TABLE;
+            idx->lines[j].rows = 1;
             j++;
         }
         i = j;
@@ -1709,6 +1762,9 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             kern = (long long)(stbtt_GetCodepointKernAdvance(&g_font, prev, (int)cp) * scale);
         }
         if (x > origin_x && (long long)x + kern + advance > max_x) {
+            if (g_line_clip) {
+                break;
+            }
             x = origin_x;
             if (row < UINT32_MAX) {
                 row++;
@@ -2168,6 +2224,23 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
     }
     mark_tables(text, idx);
+    {
+        uint64_t place = 0;
+        for (size_t li = 0; li < idx->n; li++) {
+            struct Line *line = &idx->lines[li];
+            if (caret >= line->off && caret <= line->off + line->content) {
+                idx->caret_y = place;
+                if (line->kind == KIND_TABLE) {
+                    idx->caret_x = origin_x;
+                }
+            }
+            uint64_t next = 0;
+            if (add_rows(place, line->rows, line_h, &next) != 0) {
+                break;
+            }
+            place = next;
+        }
+    }
     keep_store(idx, text, text_len, caret, origin_x, max_x, line_h, space_px, scale);
     return 0;
 }
@@ -2717,9 +2790,15 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
             }
             int cx = 0;
             int crow = 0;
-            layout_line(px, width, height, text, line->off + at[c], len[c], SIZE_MAX, ox, x + cell, origin_y, line_h, baseline,
-                        space_px, scale, 1, row_y, scroll, view_h, 0, 0, 1, NULL, header ? KIND_HEAD : KIND_BODY, &cx,
-                        &crow);
+            int edge = x + cell;
+            if (edge < ox) {
+                edge = ox;
+            }
+            g_line_clip = 1;
+            layout_line(px, width, height, text, line->off + at[c], len[c], SIZE_MAX, ox, edge, origin_y, line_h,
+                        baseline, space_px, scale, 1, row_y, scroll, view_h, 0, 0, 1, NULL,
+                        header ? KIND_HEAD : KIND_BODY, &cx, &crow);
+            g_line_clip = 0;
         }
         x += col_w[c];
     }
@@ -2909,6 +2988,19 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         return;
     }
     uint64_t scroll = scroll_of(&idx, line_h, view_h);
+    g_view_ready = 1;
+    g_view_at = 0;
+    uint64_t mid = scroll;
+    {
+        uint64_t half = (uint64_t)(view_h / 2);
+        uint64_t sum = scroll > UINT64_MAX - half ? UINT64_MAX : scroll + half;
+        if (g_pad > 0) {
+            uint64_t pad = (uint64_t)g_pad;
+            mid = sum > pad ? sum - pad : 0;
+        } else {
+            mid = sum;
+        }
+    }
 
     size_t caret_li = 0;
     for (size_t i = 0; i < idx.n; i++) {
@@ -2923,6 +3015,9 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         uint64_t next = 0;
         if (add_rows(y, line.rows, line_h, &next) != 0) {
             break;
+        }
+        if (y <= mid) {
+            g_view_at = line.off;
         }
         uint64_t window = scroll;
         if ((uint64_t)view_h <= UINT64_MAX - window) {
@@ -2948,10 +3043,10 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
                 }
             }
         }
-        if (!source && line.kind == KIND_TABLE && next > scroll && y < window) {
+        if (line.kind == KIND_TABLE && line.rows > 0 && next > scroll && y < window) {
             paint_table_line(px, width, height, text, &idx, li, origin_x, max_x, origin_y, line_h, baseline, scale,
                              space_px, y, scroll, view_h);
-        } else if (next > scroll && y < window && line.content > 0) {
+        } else if (line.kind != KIND_TABLE && next > scroll && y < window && line.content > 0) {
             uint8_t *mark = NULL;
             const uint8_t *marks = NULL;
             if (line.kind == KIND_BODY && line.content <= (1u << 18)) {
@@ -3454,13 +3549,16 @@ void page_draw_tool(uint8_t *px, int width, int height, int x, int y, int w, int
     int hb = 0;
     slot_rgb(SLOT_RULE, &hr, &hg, &hb);
     blend_rect(px, width, height, x, y, w, 1, hr, hg, hb, 140);
-    int room = w < h ? w : h;
-    int side = room * 1000 / 1618;
+    /* Half the strip. A 48dp bar holds a 24dp mark, with the rest as quiet padding. */
+    int side = h / 2;
+    if (side > w - 16) {
+        side = w - 16;
+    }
     if (side < 16) {
         side = 16;
     }
-    if (side > room - 4) {
-        side = room - 4;
+    if (side > h - 8) {
+        side = h - 8;
     }
     if (side < 8) {
         side = 8;

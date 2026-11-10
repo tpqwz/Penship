@@ -44,8 +44,8 @@ static void test_phone(void) {
     expect(chrome.text_h == height - 80 - 160, "the column fills the space between the insets");
     expect(chrome.y[CHROME_SETTINGS] < chrome.text_y + chrome.text_h, "the menu mark floats on the column");
     chrome_place(&chrome, width, height, 80, 160, density, 0, 1000, NULL, NULL, 1);
-    expect(chrome.h[CHROME_BOLD] >= thumb_of(density), "the formatting row is a thumb tall");
-    expect(chrome.w[CHROME_BOLD] == thumb_of(density), "a format cell is a thumb wide");
+    expect(chrome.h[CHROME_BOLD] == thumb_of(density), "the formatting row is a thumb tall");
+    expect(chrome.w[CHROME_BOLD] == width / 12, "the twelve marks share the width");
     expect(chrome.text_y + chrome.text_h <= chrome.y[CHROME_BOLD], "the column stops above the marks");
     expect(chrome.y[CHROME_BOLD] - (chrome.text_y + chrome.text_h) > 0, "a gap sits between the type and the marks");
     expect(chrome.y[CHROME_BOLD] + chrome.h[CHROME_BOLD] == height - 160, "the marks sit above the bottom inset");
@@ -59,7 +59,7 @@ static void test_phone(void) {
     expect(strcmp(chrome_label(CHROME_BLOCK), "Block") == 0, "block label");
     int bar = 100000;
     chrome_place(&chrome, width, height, 80, 160, density, 0, 1000, NULL, &bar, 1);
-    expect(bar > 0 && chrome.x[CHROME_BLOCK] + chrome.w[CHROME_BLOCK] == width, "the bar scrolls to the last mark");
+    expect(bar == 0 && chrome.x[CHROME_BLOCK] + chrome.w[CHROME_BLOCK] == width, "a phone bar keeps every mark on screen");
     expect(strcmp(chrome_label(CHROME_BOLD), "Bold") == 0, "bold label");
     expect(strcmp(chrome_label(CHROME_ITALIC), "Italic") == 0, "italic label");
     expect(strcmp(chrome_label(CHROME_STRIKE), "Strike") == 0, "strike label");
@@ -115,7 +115,7 @@ static void test_settings_view(void) {
     expect(chrome.w[CHROME_BOLD] == 0 && chrome.w[CHROME_CODE] == 0, "the formatting bar waits for the page");
     chrome_place(&chrome, width, height, 80, 160, density, 2, 1000, NULL, NULL, 1);
     int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,  CHROME_FONTFILE, CHROME_TYPEWRITER,
-                   CHROME_FOCUS,  CHROME_LINE,   CHROME_GLIDE, CHROME_THEME,    CHROME_SOURCE,
+                   CHROME_FOCUS,  CHROME_LINE,   CHROME_SECTIONS, CHROME_GLIDE, CHROME_THEME, CHROME_SOURCE,
                    CHROME_READONLY};
     for (int i = 0; i < (int)(sizeof prefs / sizeof prefs[0]); i++) {
         expect_placed(&chrome, prefs[i], width, height);
@@ -124,7 +124,9 @@ static void test_settings_view(void) {
     expect(chrome.y[CHROME_FONTFILE] > chrome.y[CHROME_FONT], "font file sits under font");
     expect(strcmp(chrome_label(CHROME_FONTFILE), "Font file") == 0, "font file label");
     expect(chrome.y[CHROME_LINE] > chrome.y[CHROME_FOCUS], "line sits under focus");
-    expect(chrome.y[CHROME_GLIDE] > chrome.y[CHROME_LINE], "glide sits under line");
+    expect(chrome.y[CHROME_SECTIONS] > chrome.y[CHROME_LINE], "sections sits under line");
+    expect(chrome.y[CHROME_GLIDE] > chrome.y[CHROME_SECTIONS], "glide sits under sections");
+    expect(strcmp(chrome_label(CHROME_SECTIONS), "Sections") == 0, "sections label");
     expect(strcmp(chrome_label(CHROME_GLIDE), "Glide") == 0, "glide label");
     expect(strcmp(chrome_label(CHROME_LINE), "Line") == 0, "line label");
     expect(chrome.y[CHROME_READONLY] > chrome.y[CHROME_SOURCE], "read only sits under source");

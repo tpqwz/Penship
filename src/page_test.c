@@ -507,6 +507,45 @@ static void test_rendered(const unsigned char *font, int font_len) {
     page_set_editing(0);
     expect(table_grid > 40 && table_grid > table_source, "a rendered table draws a grid");
     expect(table_head > 0, "a rendered table header is a heading");
+    const char *wide_table =
+        "| Heading | a long phrase that wraps badly | ok |\n| --- | :---: | ---: |\n| fig | stays put | 2 |\n";
+    const int narrow = 280;
+    uint8_t *wide_px = calloc((size_t)narrow * 500, 4);
+    expect(wide_px != NULL, "wide table buffer");
+    if (wide_px != NULL) {
+        page_set_editing(0);
+        page_draw(wide_px, narrow, 500, 0, 0, narrow, 500, wide_table, strlen(wide_table), strlen(wide_table),
+                  strlen(wide_table), 28);
+        int head_y0 = -1;
+        int head_y1 = -1;
+        int ink_y0 = -1;
+        for (int y = 0; y < 500; y++) {
+            int head = 0;
+            int ink = 0;
+            for (int x = 0; x < narrow; x++) {
+                const uint8_t *p = wide_px + ((size_t)y * (size_t)narrow + (size_t)x) * 4;
+                if (p[0] > PAGE_HEAD_R - 12 && p[0] < PAGE_HEAD_R + 12 && p[1] > PAGE_HEAD_G - 12 &&
+                    p[1] < PAGE_HEAD_G + 12 && p[2] > PAGE_HEAD_B - 12 && p[2] < PAGE_HEAD_B + 12) {
+                    head = 1;
+                }
+                if (p[0] < 80 && p[1] < 80 && p[2] < 80) {
+                    ink = 1;
+                }
+            }
+            if (head) {
+                if (head_y0 < 0) {
+                    head_y0 = y;
+                }
+                head_y1 = y;
+            }
+            if (ink && head_y1 >= 0 && y > head_y1 + 4 && ink_y0 < 0) {
+                ink_y0 = y;
+            }
+        }
+        expect(head_y0 >= 0 && head_y1 - head_y0 < 48, "a squeezed table header stays on one row");
+        expect(ink_y0 >= 0 && ink_y0 - head_y1 < 70, "the delimiter row is not a blank line");
+        free(wide_px);
+    }
 
     const char *struck = "~~H~~\nZ";
     page_draw(px, width, height, 0, 0, width, height, struck, strlen(struck), strlen(struck), strlen(struck), font_px);
@@ -1015,6 +1054,23 @@ static void test_heads(void) {
     expect(page_heads(cut, 75, heads, 1) == 1, "a heading with a trailing e-acute");
     size_t tn = strlen(heads[0].title);
     expect(tn == 70 && heads[0].title[tn] == '\0', "the title stops before a split code point");
+    const char *path = "intro\n# A\n## B\n### C\nbody\n## D\n";
+    struct PageHead trail[6];
+    size_t body = (size_t)(strstr(path, "body") - path);
+    size_t dee = (size_t)(strstr(path, "## D") - path);
+    int depth = page_trail(path, strlen(path), body, trail, 6);
+    expect(depth == 3, "the body sits under three headings");
+    expect(strcmp(trail[0].title, "A") == 0 && trail[0].level == 1, "the outer heading is A");
+    expect(strcmp(trail[1].title, "B") == 0 && trail[1].level == 2, "the middle heading is B");
+    expect(strcmp(trail[2].title, "C") == 0 && trail[2].level == 3, "the inner heading is C");
+    depth = page_trail(path, strlen(path), dee, trail, 6);
+    expect(depth == 2 && strcmp(trail[0].title, "A") == 0 && strcmp(trail[1].title, "D") == 0,
+           "a new section closes the inner headings");
+    expect(page_trail(path, strlen(path), 0, trail, 6) == 0, "text before the first heading has no trail");
+    expect(page_sections() == 1, "the section trail starts on");
+    page_set_sections(0);
+    expect(page_sections() == 0, "the section trail can be turned off");
+    page_set_sections(1);
 }
 
 int main(void) {

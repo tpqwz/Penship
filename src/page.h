@@ -93,6 +93,18 @@ struct PageHead {
    Returns the count, or 0 when heads is null or cap is not positive. */
 int page_heads(const char *text, size_t len, struct PageHead *heads, int cap);
 
+/* Headings that contain at, from the outer one to the inner one. h1, then h2, and so on.
+   A later heading of the same or higher level closes the ones inside it. Returns the count, or 0. */
+int page_trail(const char *text, size_t len, size_t at, struct PageHead *trail, int cap);
+
+/* Byte at the middle of the last page_draw. page_view_ready is 0 until that draw finishes. */
+size_t page_view_at(void);
+int page_view_ready(void);
+
+/* The sticky section trail. On by default. */
+void page_set_sections(int on);
+int page_sections(void);
+
 /* ttf must stay alive for every later page_draw. Returns 0, or -1 if it is not a TrueType font. */
 int page_set_font(const unsigned char *ttf, int len);
 

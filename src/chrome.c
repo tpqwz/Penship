@@ -7,7 +7,7 @@ static const char *k_labels[CHROME_COUNT] = {
     "Open",   "Save",     "Save as", "Export", "Contents", "Smaller", "Larger", "Font", "Typewriter",
     "Focus",  "Line",     "Theme",   "Source", "Menu",     "Done",    "Bold",   "Italic", "Strike", "Code",
     "Link",   "Head",     "List",    "Task",   "Quote",    "Rule",    "Table",  "Block",  "Read only", "Find",
-    "Settings", "Font file", "Glide"};
+    "Settings", "Font file", "Glide", "Sections"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -201,7 +201,8 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         static const int k_menu[] = {CHROME_OPEN,   CHROME_SAVE,     CHROME_SAVE_AS, CHROME_EXPORT,
                                     CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS};
         static const int k_options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,       CHROME_FONTFILE,
-                                       CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_GLIDE,
+                                       CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_SECTIONS,
+                                       CHROME_GLIDE,
                                        CHROME_THEME,
                                        CHROME_SOURCE,  CHROME_READONLY};
         const int *rows = screen == 2 ? k_options : k_menu;
@@ -219,21 +220,24 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
     place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
     int text_h = inner;
     if (editing && width >= 4 && inner > thumb * 2) {
-        int by = height - inset_bottom - thumb;
-        if (by < inset_top) {
-            by = inset_top;
-        }
         static const int k_bar[] = {CHROME_BOLD,  CHROME_ITALIC, CHROME_STRIKE, CHROME_CODE, CHROME_LINK, CHROME_HEAD,
                                     CHROME_LIST,  CHROME_TASK,   CHROME_QUOTE,  CHROME_RULE, CHROME_TABLE, CHROME_BLOCK};
         int nbar = (int)(sizeof k_bar / sizeof k_bar[0]);
         int col = thumb;
+        int share = nbar > 0 ? width / nbar : width;
+        int bar_h = thumb;
         if (col > width) {
             col = width;
         }
         if (col < 1) {
             col = 1;
         }
-        if (nbar > 0 && col <= INT_MAX / nbar && col * nbar <= width) {
+        /* The strip stays a thumb tall, like a format bar. The slots share the width. */
+        int by = height - inset_bottom - bar_h;
+        if (by < inset_top) {
+            by = inset_top;
+        }
+        if (nbar > 0 && share >= 44) {
             int base = width / nbar;
             int rem = width % nbar;
             int x = 0;
@@ -245,7 +249,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
                 if (cw < 1) {
                     cw = 1;
                 }
-                place_one(chrome, k_bar[i], x, by, cw, thumb);
+                place_one(chrome, k_bar[i], x, by, cw, bar_h);
                 x += cw;
             }
         } else {
@@ -263,14 +267,14 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
                 *bar_scroll = at;
             }
             for (int i = 0; i < nbar; i++) {
-                place_one(chrome, k_bar[i], i * col - at, by, col, thumb);
+                place_one(chrome, k_bar[i], i * col - at, by, col, bar_h);
             }
         }
-        int air = thumb * 382 / 1000;
+        int air = thumb / 8;
         if (air < 8) {
             air = 8;
         }
-        text_h = inner - thumb - air;
+        text_h = inner - bar_h - air;
         if (text_h < 1) {
             text_h = 1;
         }

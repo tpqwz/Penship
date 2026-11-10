@@ -97,6 +97,14 @@ struct App {
     int contents_row_y[PAGE_HEADS_MAX + 2];
     size_t head_at[PAGE_HEADS_MAX];
     int head_n;
+    int wheel;
+    int wheel_scroll;
+    int wheel_row_h;
+    int wheel_band_y;
+    int trail_x;
+    int trail_y;
+    int trail_w;
+    int trail_h;
     int finding;
     char query[129];
     size_t query_n;
@@ -332,6 +340,176 @@ static void contents_show(struct App *app, uint8_t *px, int width, int height, i
     page_draw_labels(px, width, height, rows, xs, ys, ws, hs, labels, 0, label_px, top, bottom);
 }
 
+static void fill_box(uint8_t *px, int width, int height, int x, int y, int w, int h, int r, int g, int b) {
+    if (px == NULL || w < 1 || h < 1) {
+        return;
+    }
+    for (int row = 0; row < h; row++) {
+        int yy = y + row;
+        if (yy < 0 || yy >= height) {
+            continue;
+        }
+        for (int col = 0; col < w; col++) {
+            int xx = x + col;
+            if (xx < 0 || xx >= width) {
+                continue;
+            }
+            uint8_t *p = px + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
+            p[0] = (uint8_t)r;
+            p[1] = (uint8_t)g;
+            p[2] = (uint8_t)b;
+            p[3] = 255;
+        }
+    }
+}
+
+static int fill_trail(struct App *app, char *buf, size_t cap) {
+    size_t len = 0;
+    const char *text = app->doc != NULL ? doc_text(app->doc, &len) : "";
+    struct PageHead trail[6];
+    size_t at = page_view_ready() ? page_view_at() : doc_caret(app->doc);
+    int n = 0;
+    size_t o = 0;
+    if (buf == NULL || cap < 2) {
+        return 0;
+    }
+    buf[0] = '\0';
+    if (at > len) {
+        at = len;
+    }
+    n = page_trail(text, len, at, trail, 6);
+    for (int i = 0; i < n && o + 1 < cap; i++) {
+        size_t t = 0;
+        if (i > 0 && o + 3 < cap) {
+            buf[o++] = ' ';
+            buf[o++] = '/';
+            buf[o++] = ' ';
+        }
+        while (trail[i].title[t] != '\0' && o + 1 < cap) {
+            buf[o++] = trail[i].title[t++];
+        }
+    }
+    buf[o] = '\0';
+    return o > 0 ? n : 0;
+}
+
+static int trail_hit(const struct App *app, int x, int y) {
+    return app->trail_w > 0 && app->trail_h > 0 && x >= app->trail_x && y >= app->trail_y &&
+           x < app->trail_x + app->trail_w && y < app->trail_y + app->trail_h;
+}
+
+static void open_wheel(struct App *app) {
+    size_t len = 0;
+    const char *text = app->doc != NULL ? doc_text(app->doc, &len) : "";
+    struct PageHead heads[PAGE_HEADS_MAX];
+    int n = page_heads(text, len, heads, PAGE_HEADS_MAX);
+    size_t at = page_view_ready() ? page_view_at() : doc_caret(app->doc);
+    int idx = 0;
+    int density = 160;
+    int row_h = 0;
+    if (at > len) {
+        at = len;
+    }
+    for (int i = 0; i < n; i++) {
+        if (heads[i].at <= at) {
+            idx = i;
+        }
+    }
+    if (app->android != NULL && app->android->config != NULL) {
+        density = AConfiguration_getDensity(app->android->config);
+    }
+    row_h = chrome_row_px(density, font_scale_milli(app));
+    if (row_h < 1) {
+        row_h = 1;
+    }
+    app->wheel = 1;
+    app->wheel_scroll = n > 0 ? idx * row_h : 0;
+    hide_keyboard(app);
+    claim_back(app);
+}
+
+static void wheel_show(struct App *app, uint8_t *px, int width, int height, int top, int bottom, int label_px) {
+    struct PageHead heads[PAGE_HEADS_MAX];
+    char shown[PAGE_HEADS_MAX][PAGE_HEAD_TITLE + 8];
+    const char *labels[PAGE_HEADS_MAX];
+    int xs[PAGE_HEADS_MAX];
+    int ys[PAGE_HEADS_MAX];
+    int ws[PAGE_HEADS_MAX];
+    int hs[PAGE_HEADS_MAX];
+    size_t len = 0;
+    const char *text = app->doc != NULL ? doc_text(app->doc, &len) : "";
+    int n = page_heads(text, len, heads, PAGE_HEADS_MAX);
+    int row_h = app->wheel_row_h;
+    int span = 0;
+    int band_y = 0;
+    int max_scroll = 0;
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > PAGE_HEADS_MAX) {
+        n = PAGE_HEADS_MAX;
+    }
+    app->head_n = n;
+    for (int i = 0; i < n; i++) {
+        app->head_at[i] = heads[i].at;
+    }
+    if (row_h < 1) {
+        row_h = label_px + label_px / 2;
+    }
+    if (row_h < 1) {
+        row_h = 1;
+    }
+    app->wheel_row_h = row_h;
+    span = bottom - top;
+    if (span < row_h) {
+        span = row_h;
+    }
+    band_y = top + span / 2 - row_h / 2;
+    max_scroll = n > 1 ? (n - 1) * row_h : 0;
+    if (app->wheel_scroll < 0) {
+        app->wheel_scroll = 0;
+    }
+    if (app->wheel_scroll > max_scroll) {
+        app->wheel_scroll = max_scroll;
+    }
+    app->wheel_band_y = band_y;
+    fill_box(px, width, height, 0, top, width, bottom - top, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B);
+    fill_box(px, width, height, 0, band_y, width, row_h, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B);
+    if (n == 0) {
+        const char *empty = "No sections";
+        int x = 0;
+        int w = width > 0 ? width : 1;
+        int h = row_h;
+        page_draw_labels(px, width, height, 1, &x, &band_y, &w, &h, &empty, 0, label_px, top, bottom);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        int indent = heads[i].level - 1;
+        size_t o = 0;
+        if (indent < 0) {
+            indent = 0;
+        }
+        if (indent > 3) {
+            indent = 3;
+        }
+        while (indent > 0 && o + 1 < sizeof shown[i]) {
+            shown[i][o++] = ' ';
+            indent--;
+        }
+        for (size_t t = 0; heads[i].title[t] != '\0' && o + 1 < sizeof shown[i]; t++) {
+            shown[i][o++] = heads[i].title[t];
+        }
+        shown[i][o] = '\0';
+        xs[i] = 0;
+        ys[i] = band_y + i * row_h - app->wheel_scroll;
+        ws[i] = width > 0 ? width : 1;
+        hs[i] = row_h;
+        /* A row that starts above the wheel would show only its feet. */
+        labels[i] = ys[i] < top ? "" : shown[i];
+    }
+    page_draw_labels(px, width, height, n, xs, ys, ws, hs, labels, 0, label_px, top, bottom);
+}
+
 static void render(struct App *app) {
     if (!app->ready || app->doc == NULL) {
         return;
@@ -381,11 +559,57 @@ static void render(struct App *app) {
             app->chrome.text_h -= find_h;
         }
     }
+    app->trail_w = 0;
+    app->trail_h = 0;
+    char trail_text[PAGE_HEAD_TITLE * 6 + 24];
+    trail_text[0] = '\0';
+    if (page_sections() && !app->settings && !app->finding) {
+        int trail_n = fill_trail(app, trail_text, sizeof trail_text);
+        if (trail_n > 0) {
+            int gap = label_px / 3;
+            int trail_h = label_px + label_px / 2;
+            int side = 0;
+            int mark_x = 0;
+            if (gap < 8) {
+                gap = 8;
+            }
+            if (trail_h < 8) {
+                trail_h = 8;
+            }
+            /* The mark is the same height as the bar and shares its top. */
+            side = trail_h;
+            if (side > width) {
+                side = width;
+            }
+            mark_x = width - side - gap;
+            if (mark_x < 0) {
+                mark_x = 0;
+            }
+            if (app->chrome.text_h > trail_h + 1) {
+                app->chrome.x[CHROME_SETTINGS] = mark_x;
+                app->chrome.y[CHROME_SETTINGS] = app->chrome.text_y;
+                app->chrome.w[CHROME_SETTINGS] = side;
+                app->chrome.h[CHROME_SETTINGS] = side;
+                app->trail_x = app->chrome.text_x;
+                app->trail_y = app->chrome.text_y;
+                app->trail_h = trail_h;
+                app->trail_w = mark_x - gap - app->trail_x;
+                if (app->trail_w < 1) {
+                    app->trail_w = 1;
+                }
+                app->chrome.text_y += trail_h;
+                app->chrome.text_h -= trail_h;
+            }
+        }
+    }
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
     /* Count before a settings frame, which paints an empty page and would report zero words. */
     page_draw(app->pixels, width, height, app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
               app->chrome.text_h, text, len, doc_caret(app->doc), doc_anchor(app->doc), app->font_px);
+    if (page_sections() && !app->settings && !app->finding && app->trail_h > 0) {
+        fill_trail(app, trail_text, sizeof trail_text);
+    }
     int words = page_words();
     if (app->settings) {
         page_draw(app->pixels, width, height, 0, 0, 1, 1, "", 0, 0, 0, app->font_px);
@@ -405,6 +629,7 @@ static void render(struct App *app) {
         }
         labels[CHROME_GLIDE] = k_glide_label[level];
     }
+    labels[CHROME_SECTIONS] = page_sections() ? "Sections on" : "Sections off";
     int clip_bottom = height - inset_bottom;
     if (app->settings && app->contents) {
         contents_show(app, app->pixels, width, height, inset_top, clip_bottom, label_px, chrome_row_px(density, scale));
@@ -439,6 +664,28 @@ static void render(struct App *app) {
         const char *shown = app->query_n > 0 ? app->query : "Find";
         page_draw_labels(app->pixels, width, height, 1, &find_x, &find_y, &find_w, &find_h, &shown, 0, label_px,
                          inset_top, clip_bottom);
+    }
+    if (app->wheel && !app->settings) {
+        int row_h = chrome_row_px(density, scale);
+        int top = app->chrome.text_y;
+        int bottom = height - inset_bottom;
+        if (row_h < 1) {
+            row_h = 1;
+        }
+        app->wheel_row_h = row_h;
+        if (bottom < top) {
+            bottom = top;
+        }
+        wheel_show(app, app->pixels, width, height, top, bottom, label_px);
+    }
+    if (app->trail_h > 0 && trail_text[0] != '\0') {
+        const char *shown = trail_text;
+        fill_box(app->pixels, width, height, app->trail_x, app->trail_y, app->trail_w, app->trail_h, PAGE_PAPER_R,
+                 PAGE_PAPER_G, PAGE_PAPER_B);
+        page_draw_labels(app->pixels, width, height, 1, &app->trail_x, &app->trail_y, &app->trail_w, &app->trail_h,
+                         &shown, 0, label_px, inset_top, clip_bottom);
+        fill_box(app->pixels, width, height, app->trail_x, app->trail_y + app->trail_h - 1, app->trail_w, 1,
+                 PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B);
     }
     page_draw_menu(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
                    app->chrome.w[CHROME_SETTINGS]);
@@ -566,9 +813,11 @@ static void save_prefs(struct App *app) {
     if (f == NULL) {
         return;
     }
-    if (fprintf(f, "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\nline=%d\nglide=%d\ntheme=%d\nsource=%d\nreadonly=%d\n",
+    if (fprintf(f,
+                "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\nline=%d\nglide=%d\ntheme=%d\nsource=%d\nreadonly=%d\n"
+                "sections=%d\n",
                 step, face, page_typewriter(), page_focus(), page_line(), page_glide_level(), page_theme(),
-                page_source(), page_readonly()) < 0) {
+                page_source(), page_readonly(), page_sections()) < 0) {
         fclose(f);
         return;
     }
@@ -606,6 +855,8 @@ static void load_prefs(struct App *app) {
             page_set_source(value);
         } else if (sscanf(line, "readonly=%d", &value) == 1) {
             page_set_readonly(value);
+        } else if (sscanf(line, "sections=%d", &value) == 1) {
+            page_set_sections(value);
         }
     }
     fclose(f);
@@ -1583,6 +1834,11 @@ static void handle_back(struct App *app) {
         render(app);
         return;
     }
+    if (app->wheel) {
+        app->wheel = 0;
+        render(app);
+        return;
+    }
     if (app->contents) {
         app->contents = 0;
         app->contents_scroll = 0;
@@ -1747,6 +2003,25 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_DOWN) {
+            if (app->wheel && !app->settings) {
+                int down_hit = chrome_hit(&app->chrome, x, y);
+                app->glide = 0;
+                app->glide_n = 0;
+                app->edge = 0;
+                app->bar_hit = -1;
+                if (down_hit == CHROME_SETTINGS || trail_hit(app, x, y)) {
+                    app->wheel = down_hit == CHROME_SETTINGS ? 0 : app->wheel;
+                    app->drag = 0;
+                    return 0;
+                }
+                app->drag = 1;
+                app->drag_x = x;
+                app->drag_y = y;
+                app->drag_last = y;
+                app->drag_mode = 6;
+                app->drag_at = now_ms();
+                return 1;
+            }
             /* Pause the slide, but keep its speed so a flick in the same direction can add to it. */
             app->glide = 0;
             app->glide_n = 0;
@@ -1840,6 +2115,12 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_MOVE && app->drag) {
+            if (app->drag_mode == 6) {
+                app->wheel_scroll += app->drag_last - y;
+                app->drag_last = y;
+                render(app);
+                return 1;
+            }
             if (app->bar_hit >= CHROME_BOLD) {
                 int dx = x - app->drag_x;
                 int dy = y - app->drag_y;
@@ -1944,6 +2225,46 @@ static int on_input(struct android_app *android, AInputEvent *event) {
         }
         if (action == AMOTION_EVENT_ACTION_UP) {
             int dragged = app->drag && app->drag_mode != 0;
+            if (app->drag_mode == 6) {
+                int row_h = app->wheel_row_h > 0 ? app->wheel_row_h : 1;
+                int moved = y - app->drag_y;
+                int moved_x = x - app->drag_x;
+                app->drag = 0;
+                app->drag_mode = 0;
+                app->edge = 0;
+                if (moved < 0) {
+                    moved = -moved;
+                }
+                if (moved_x < 0) {
+                    moved_x = -moved_x;
+                }
+                if (moved < 24 && moved_x < 24 && app->wheel && app->head_n > 0) {
+                    int origin = app->wheel_band_y - app->wheel_scroll;
+                    int row = -1;
+                    if (y >= origin) {
+                        row = (y - origin) / row_h;
+                    }
+                    if (row >= 0 && row < app->head_n && row < PAGE_HEADS_MAX) {
+                        doc_place(app->doc, app->head_at[row]);
+                        page_set_follow(1);
+                    }
+                    app->wheel = 0;
+                } else {
+                    int s = app->wheel_scroll;
+                    int mod = s % row_h;
+                    if (mod < 0) {
+                        mod += row_h;
+                    }
+                    if (mod * 2 >= row_h) {
+                        s += row_h - mod;
+                    } else {
+                        s -= mod;
+                    }
+                    app->wheel_scroll = s;
+                }
+                render(app);
+                return 1;
+            }
             int scrolling = app->drag_mode == 1;
             app->bar_hit = -1;
             int selecting = app->drag_mode == 2;
@@ -2061,12 +2382,24 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 render(app);
                 return 1;
             }
+            if (!dragged && trail_hit(app, x, y)) {
+                app->tap_pending = 0;
+                app->tap_at = 0;
+                if (app->wheel) {
+                    app->wheel = 0;
+                } else {
+                    open_wheel(app);
+                }
+                render(app);
+                return 1;
+            }
             int hit = chrome_hit(&app->chrome, x, y);
             if (hit >= 0) {
                 app->tap_pending = 0;
                 app->tap_at = 0;
             }
             if (hit == CHROME_SETTINGS) {
+                app->wheel = 0;
                 if (app->settings) {
                     app->settings = 0;
                     app->options = 0;
@@ -2166,6 +2499,11 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 page_set_focus(!page_focus());
             } else if (hit == CHROME_LINE) {
                 page_set_line(!page_line());
+            } else if (hit == CHROME_SECTIONS) {
+                page_set_sections(!page_sections());
+                if (!page_sections()) {
+                    app->wheel = 0;
+                }
             } else if (hit == CHROME_GLIDE) {
                 page_set_glide((page_glide_level() + 1) % 5);
             } else if (hit == CHROME_THEME) {
