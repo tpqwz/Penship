@@ -105,6 +105,11 @@ int page_view_ready(void);
 void page_set_sections(int on);
 int page_sections(void);
 
+/* Format-bar paper. 0 is clear, 1 is a wash, 2 is solid. Solid by default. */
+void page_set_bar(int level);
+int page_bar(void);
+int page_bar_cover(void);
+
 /* ttf must stay alive for every later page_draw. Returns 0, or -1 if it is not a TrueType font. */
 int page_set_font(const unsigned char *ttf, int len);
 

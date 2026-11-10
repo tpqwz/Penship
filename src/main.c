@@ -630,6 +630,17 @@ static void render(struct App *app) {
         labels[CHROME_GLIDE] = k_glide_label[level];
     }
     labels[CHROME_SECTIONS] = page_sections() ? "Sections on" : "Sections off";
+    {
+        static const char *k_bar_label[] = {"Bar clear", "Bar wash", "Bar solid"};
+        int level = page_bar();
+        if (level < 0) {
+            level = 0;
+        }
+        if (level > 2) {
+            level = 2;
+        }
+        labels[CHROME_BAR] = k_bar_label[level];
+    }
     int clip_bottom = height - inset_bottom;
     if (app->settings && app->contents) {
         contents_show(app, app->pixels, width, height, inset_top, clip_bottom, label_px, chrome_row_px(density, scale));
@@ -637,6 +648,45 @@ static void render(struct App *app) {
         int mark_px = app->settings ? label_px : chrome_bar_px(density, scale);
         page_draw_labels(app->pixels, width, height, CHROME_COUNT, app->chrome.x, app->chrome.y, app->chrome.w,
                          app->chrome.h, labels, app->chrome.vertical, mark_px, inset_top, clip_bottom);
+        if (page_bar_cover() > 0 && app->chrome.w[CHROME_BOLD] > 0 && app->chrome.h[CHROME_BOLD] > 0) {
+            int x0 = app->chrome.x[CHROME_BOLD];
+            int y0 = app->chrome.y[CHROME_BOLD];
+            int x1 = x0;
+            int y1 = y0 + app->chrome.h[CHROME_BOLD];
+            for (int tool = CHROME_BOLD; tool <= CHROME_BLOCK; tool++) {
+                if (app->chrome.w[tool] <= 0) {
+                    continue;
+                }
+                if (app->chrome.x[tool] < x0) {
+                    x0 = app->chrome.x[tool];
+                }
+                int right = app->chrome.x[tool] + app->chrome.w[tool];
+                if (right > x1) {
+                    x1 = right;
+                }
+            }
+            int cover = page_bar_cover();
+            if (cover >= 255) {
+                fill_box(app->pixels, width, height, x0, y0, x1 - x0, y1 - y0, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B);
+            } else {
+                for (int row = 0; row < y1 - y0; row++) {
+                    int yy = y0 + row;
+                    if (yy < 0 || yy >= height) {
+                        continue;
+                    }
+                    for (int col = 0; col < x1 - x0; col++) {
+                        int xx = x0 + col;
+                        if (xx < 0 || xx >= width) {
+                            continue;
+                        }
+                        uint8_t *p = app->pixels + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
+                        p[0] = (uint8_t)((PAGE_PAPER_R * cover + (int)p[0] * (255 - cover)) / 255);
+                        p[1] = (uint8_t)((PAGE_PAPER_G * cover + (int)p[1] * (255 - cover)) / 255);
+                        p[2] = (uint8_t)((PAGE_PAPER_B * cover + (int)p[2] * (255 - cover)) / 255);
+                    }
+                }
+            }
+        }
         for (int tool = CHROME_BOLD; tool <= CHROME_BLOCK; tool++) {
             if (app->chrome.w[tool] > 0 && app->chrome.h[tool] > 0) {
                 page_draw_tool(app->pixels, width, height, app->chrome.x[tool], app->chrome.y[tool],
@@ -815,9 +865,9 @@ static void save_prefs(struct App *app) {
     }
     if (fprintf(f,
                 "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\nline=%d\nglide=%d\ntheme=%d\nsource=%d\nreadonly=%d\n"
-                "sections=%d\n",
+                "sections=%d\nbar=%d\n",
                 step, face, page_typewriter(), page_focus(), page_line(), page_glide_level(), page_theme(),
-                page_source(), page_readonly(), page_sections()) < 0) {
+                page_source(), page_readonly(), page_sections(), page_bar()) < 0) {
         fclose(f);
         return;
     }
@@ -857,6 +907,8 @@ static void load_prefs(struct App *app) {
             page_set_readonly(value);
         } else if (sscanf(line, "sections=%d", &value) == 1) {
             page_set_sections(value);
+        } else if (sscanf(line, "bar=%d", &value) == 1) {
+            page_set_bar(value);
         }
     }
     fclose(f);
@@ -2504,6 +2556,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 if (!page_sections()) {
                     app->wheel = 0;
                 }
+            } else if (hit == CHROME_BAR) {
+                page_set_bar((page_bar() + 1) % 3);
             } else if (hit == CHROME_GLIDE) {
                 page_set_glide((page_glide_level() + 1) % 5);
             } else if (hit == CHROME_THEME) {

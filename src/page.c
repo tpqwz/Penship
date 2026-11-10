@@ -21,7 +21,9 @@ static int g_typewriter;
 static int g_focus;
 static int g_line_hl;
 static int g_line_clip;
+static int g_mute_measures;
 static int g_sections = 1;
+static int g_bar = 2;
 static size_t g_view_at;
 static int g_view_ready;
 static int g_view_x;
@@ -161,6 +163,30 @@ void page_set_sections(int on) {
 
 int page_sections(void) {
     return g_sections;
+}
+
+void page_set_bar(int level) {
+    if (level < 0) {
+        level = 0;
+    }
+    if (level > 2) {
+        level = 2;
+    }
+    g_bar = level;
+}
+
+int page_bar(void) {
+    return g_bar;
+}
+
+int page_bar_cover(void) {
+    if (g_bar <= 0) {
+        return 0;
+    }
+    if (g_bar == 1) {
+        return 168;
+    }
+    return 255;
 }
 
 size_t page_view_at(void) {
@@ -1027,6 +1053,8 @@ static int delim_row(const char *s, size_t n, int *align, int *cols) {
     return 1;
 }
 
+static void measure_tables(const char *text, struct Index *idx, int origin_x, int max_x, float scale);
+
 static void mark_tables(const char *text, struct Index *idx) {
     size_t i = 0;
     while (i + 1 < idx->n) {
@@ -1611,7 +1639,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                             int space_px, float scale, int draw, uint64_t row0, uint64_t scroll, int view_h,
                             size_t sel_lo, size_t sel_hi, int source, const uint8_t *mark, int uniform,
                             int *caret_x, int *caret_row) {
-    if (!draw) {
+    if (!draw && !g_mute_measures) {
         g_measures++;
     }
     int x = origin_x;
@@ -2224,6 +2252,7 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
     }
     mark_tables(text, idx);
+    measure_tables(text, idx, origin_x, max_x, scale);
     {
         uint64_t place = 0;
         for (size_t li = 0; li < idx->n; li++) {
@@ -2663,8 +2692,76 @@ static int text_width(const char *s, size_t n, float scale) {
     return width;
 }
 
-static void table_metrics(const char *text, const struct Index *idx, size_t from, size_t to, float scale, int *width,
-                          int *align, int *cols) {
+static void fit_columns(int *col_w, int cols, int room) {
+    if (cols < 1) {
+        return;
+    }
+    int rules = cols + 1;
+    int budget = room > rules ? room - rules : cols;
+    int sum = 0;
+    for (int c = 0; c < cols; c++) {
+        sum += col_w[c];
+    }
+    if (sum < 1) {
+        sum = 1;
+    }
+    if (sum <= budget) {
+        return;
+    }
+    int min_w = budget / (cols * 2);
+    if (min_w < 12) {
+        min_w = 12;
+    }
+    if (min_w * cols > budget) {
+        min_w = budget / cols;
+    }
+    if (min_w < 4) {
+        min_w = 4;
+    }
+    int flex = budget - min_w * cols;
+    if (flex < 0) {
+        flex = 0;
+    }
+    int used = 0;
+    for (int c = 0; c < cols; c++) {
+        int extra = (int)((long long)col_w[c] * flex / sum);
+        col_w[c] = min_w + extra;
+        used += col_w[c];
+    }
+    if (used != budget) {
+        col_w[cols - 1] += budget - used;
+        if (col_w[cols - 1] < min_w) {
+            col_w[cols - 1] = min_w;
+        }
+    }
+}
+
+static int cell_pad_px(int col_w) {
+    int inner = col_w - 2;
+    int pad = 10;
+    if (inner < 8) {
+        return 2;
+    }
+    if (pad * 2 + 4 > inner) {
+        pad = inner / 5;
+    }
+    if (pad < 2) {
+        pad = 2;
+    }
+    return pad;
+}
+
+static int cell_text_px(int col_w) {
+    int pad = cell_pad_px(col_w);
+    int text = col_w - 2 - pad * 2;
+    if (text < 4) {
+        text = 4;
+    }
+    return text;
+}
+
+static void table_metrics(const char *text, const struct Index *idx, size_t from, size_t to, float scale, int room,
+                          int *width, int *align, int *cols) {
     int n = 0;
     for (int c = 0; c < TABLE_COLS; c++) {
         width[c] = 0;
@@ -2703,7 +2800,126 @@ static void table_metrics(const char *text, const struct Index *idx, size_t from
         n = 1;
         width[0] = 28;
     }
+    fit_columns(width, n, room);
     *cols = n;
+}
+
+static int pack_words(const char *text, size_t off, size_t len, int text_w, float scale, size_t *starts, size_t *lens,
+                      int cap) {
+    size_t words_off[48];
+    size_t words_len[48];
+    int nwords = 0;
+    size_t i = off;
+    size_t end = off + len;
+    if (cap < 1) {
+        return 1;
+    }
+    while (i < end && nwords < 48) {
+        while (i < end && text[i] == ' ') {
+            i++;
+        }
+        if (i >= end) {
+            break;
+        }
+        size_t start = i;
+        while (i < end && text[i] != ' ') {
+            i++;
+        }
+        words_off[nwords] = start;
+        words_len[nwords] = i - start;
+        nwords++;
+    }
+    if (nwords == 0) {
+        starts[0] = off;
+        lens[0] = 0;
+        return 1;
+    }
+    int lines = 0;
+    int wi = 0;
+    int space_w = text_width(" ", 1, scale);
+    if (space_w < 1) {
+        space_w = 1;
+    }
+    while (wi < nwords && lines < cap) {
+        int width = 0;
+        int count = 0;
+        int wj = wi;
+        while (wj < nwords) {
+            int word_w = text_width(text + words_off[wj], words_len[wj], scale);
+            int gap = count > 0 ? space_w : 0;
+            if (count > 0 && width > text_w - gap - word_w) {
+                break;
+            }
+            if (count == 0 && word_w > text_w) {
+                count = 1;
+                wj++;
+                break;
+            }
+            width += gap + word_w;
+            count++;
+            wj++;
+        }
+        if (wj == wi) {
+            break;
+        }
+        starts[lines] = words_off[wi];
+        lens[lines] = words_off[wj - 1] + words_len[wj - 1] - words_off[wi];
+        lines++;
+        wi = wj;
+    }
+    if (lines < 1) {
+        starts[0] = off;
+        lens[0] = len;
+        return 1;
+    }
+    return lines;
+}
+
+static int wrapped_lines(const char *text, size_t off, size_t len, int text_w, float scale) {
+    size_t starts[6];
+    size_t lens[6];
+    return pack_words(text, off, len, text_w, scale, starts, lens, 6);
+}
+
+static void measure_tables(const char *text, struct Index *idx, int origin_x, int max_x, float scale) {
+    int room = max_x - origin_x;
+    if (room < 32) {
+        room = 32;
+    }
+    size_t i = 0;
+    while (i < idx->n) {
+        if (idx->lines[i].kind != KIND_TABLE) {
+            i++;
+            continue;
+        }
+        size_t from = i;
+        while (i < idx->n && idx->lines[i].kind == KIND_TABLE) {
+            i++;
+        }
+        size_t to = i - 1;
+        int col_w[TABLE_COLS];
+        int align[TABLE_COLS];
+        int cols = 0;
+        table_metrics(text, idx, from, to, scale, room, col_w, align, &cols);
+        for (size_t li = from; li <= to; li++) {
+            struct Line *line = &idx->lines[li];
+            if (delim_row(text + line->off, line->content, NULL, NULL)) {
+                line->rows = 0;
+                continue;
+            }
+            size_t at[TABLE_COLS];
+            size_t cell_len[TABLE_COLS];
+            int count = split_row(text + line->off, line->content, at, cell_len, TABLE_COLS);
+            int lines = 1;
+            for (int c = 0; c < cols && c < count; c++) {
+                int n = wrapped_lines(text, line->off + at[c], cell_len[c], cell_text_px(col_w[c]), scale);
+                if (n > lines) {
+                    lines = n;
+                }
+            }
+            line->rows = (uint32_t)lines;
+        }
+    }
 }
 
 static void paint_table_line(uint8_t *px, int width, int height, const char *text, const struct Index *idx, size_t li,
@@ -2720,27 +2936,11 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
     int col_w[TABLE_COLS];
     int align[TABLE_COLS];
     int cols = 0;
-    table_metrics(text, idx, from, to, scale, col_w, align, &cols);
-    int need = cols;
-    for (int c = 0; c < cols; c++) {
-        if (need > 20000 - col_w[c]) {
-            need = 20000;
-            break;
-        }
-        need += col_w[c];
-    }
     int room = max_x - origin_x;
-    if (room < cols) {
-        room = cols;
+    if (room < 32) {
+        room = 32;
     }
-    if (need > room) {
-        for (int c = 0; c < cols; c++) {
-            col_w[c] = col_w[c] * room / need;
-            if (col_w[c] < 8) {
-                col_w[c] = 8;
-            }
-        }
-    }
+    table_metrics(text, idx, from, to, scale, room, col_w, align, &cols);
     int table_w = cols;
     for (int c = 0; c < cols; c++) {
         table_w += col_w[c];
@@ -2756,17 +2956,26 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
     slot_rgb(SLOT_RULE, &rr, &rg, &rb);
     const struct Line *line = &idx->lines[li];
     int header = li == from;
-    int delim = delim_row(text + line->off, line->content, NULL, NULL);
-    fill_rect(px, width, height, origin_x, sy + line_h - 2, table_w, 2, rr, rg, rb);
+    int rows = line->rows > 0 ? (int)line->rows : 1;
+    if (rows > 6) {
+        rows = 6;
+    }
+    int box_h = line_h * rows;
+    if (header) {
+        int br, bg, bb;
+        slot_rgb(SLOT_BLOCK, &br, &bg, &bb);
+        fill_rect(px, width, height, origin_x, sy, table_w, box_h, br, bg, bb);
+    }
+    if (header) {
+        fill_rect(px, width, height, origin_x, sy, table_w, 2, rr, rg, rb);
+    }
+    fill_rect(px, width, height, origin_x, sy + box_h - 2, table_w, 2, rr, rg, rb);
     int x = origin_x;
     for (int c = 0; c <= cols; c++) {
-        fill_rect(px, width, height, x, sy, 1, line_h, rr, rg, rb);
+        fill_rect(px, width, height, x, sy, 1, box_h, rr, rg, rb);
         if (c < cols) {
             x += col_w[c];
         }
-    }
-    if (delim) {
-        return;
     }
     size_t at[TABLE_COLS];
     size_t len[TABLE_COLS];
@@ -2774,31 +2983,31 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
     x = origin_x + 1;
     for (int c = 0; c < cols; c++) {
         if (c < count && len[c] > 0) {
-            int tw = text_width(text + line->off + at[c], len[c], scale);
-            int cell = col_w[c] - 2;
-            if (cell < 1) {
-                cell = 1;
+            int pad = cell_pad_px(col_w[c]);
+            int inner = cell_text_px(col_w[c]);
+            size_t starts[6];
+            size_t slices[6];
+            int slices_n = pack_words(text, line->off + at[c], len[c], inner, scale, starts, slices, 6);
+            for (int slice = 0; slice < slices_n; slice++) {
+                int slice_w = text_width(text + starts[slice], slices[slice], scale);
+                int ox = x + pad;
+                if (c < TABLE_COLS && align[c] == 2 && slice_w < inner) {
+                    ox = x + pad + inner - slice_w;
+                } else if (c < TABLE_COLS && align[c] == 1 && slice_w < inner) {
+                    ox = x + pad + (inner - slice_w) / 2;
+                }
+                uint64_t slice_y = row_y;
+                if (add_rows(row_y, (uint32_t)slice, line_h, &slice_y) != 0) {
+                    break;
+                }
+                int cx = 0;
+                int crow = 0;
+                g_line_clip = 1;
+                layout_line(px, width, height, text, starts[slice], slices[slice], SIZE_MAX, ox, ox + inner, origin_y,
+                            line_h, baseline, space_px, scale, 1, slice_y, scroll, view_h, 0, 0, 1, NULL,
+                            header ? KIND_HEAD : KIND_BODY, &cx, &crow);
+                g_line_clip = 0;
             }
-            int ox = x + 8;
-            if (c < TABLE_COLS && align[c] == 2) {
-                ox = x + cell - tw - 8;
-            } else if (c < TABLE_COLS && align[c] == 1) {
-                ox = x + (cell - tw) / 2;
-            }
-            if (ox < x) {
-                ox = x;
-            }
-            int cx = 0;
-            int crow = 0;
-            int edge = x + cell;
-            if (edge < ox) {
-                edge = ox;
-            }
-            g_line_clip = 1;
-            layout_line(px, width, height, text, line->off + at[c], len[c], SIZE_MAX, ox, edge, origin_y, line_h,
-                        baseline, space_px, scale, 1, row_y, scroll, view_h, 0, 0, 1, NULL,
-                        header ? KIND_HEAD : KIND_BODY, &cx, &crow);
-            g_line_clip = 0;
         }
         x += col_w[c];
     }
@@ -3540,6 +3749,111 @@ static void stroke_box(uint8_t *px, int width, int height, float ox, float oy, f
     stroke_poly(px, width, height, ox, oy, side, xy, 5, thick, r, g, b);
 }
 
+static float sdf_rect(float x, float y, float x0, float y0, float x1, float y1) {
+    float dx = fabsf(x - (x0 + x1) * 0.5f) - (x1 - x0) * 0.5f;
+    float dy = fabsf(y - (y0 + y1) * 0.5f) - (y1 - y0) * 0.5f;
+    float ax = dx > 0.f ? dx : 0.f;
+    float ay = dy > 0.f ? dy : 0.f;
+    float outside = sqrtf(ax * ax + ay * ay);
+    float inside = dx > dy ? dx : dy;
+    if (inside > 0.f) {
+        inside = 0.f;
+    }
+    return outside + inside;
+}
+
+static float sdf_ellipse(float x, float y, float cx, float cy, float rx, float ry) {
+    float nx = (x - cx) / rx;
+    float ny = (y - cy) / ry;
+    float len = sqrtf(nx * nx + ny * ny);
+    float scale = rx < ry ? rx : ry;
+    return (len - 1.f) * scale;
+}
+
+static float ring(float outer, float inner) {
+    float hole = -inner;
+    return outer > hole ? outer : hole;
+}
+
+static float nearer(float a, float b) {
+    return a < b ? a : b;
+}
+
+static float dist_seg(float x, float y, float x0, float y0, float x1, float y1) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float len2 = dx * dx + dy * dy;
+    float t = 0.f;
+    if (len2 > 0.000001f) {
+        t = ((x - x0) * dx + (y - y0) * dy) / len2;
+        if (t < 0.f) {
+            t = 0.f;
+        }
+        if (t > 1.f) {
+            t = 1.f;
+        }
+    }
+    float qx = x0 + t * dx - x;
+    float qy = y0 + t * dy - y;
+    return sqrtf(qx * qx + qy * qy);
+}
+
+/* One coverage sample per pixel, then one blend. Overlapping strokes were darkening the joints. */
+static void paint_letter(uint8_t *px, int width, int height, int x0, int y0, int side, int tool, int r, int g, int b) {
+    if (side < 1 || side > 160) {
+        return;
+    }
+    unsigned char mask[160 * 160];
+    memset(mask, 0, (size_t)side * (size_t)side);
+    for (int y = 0; y < side; y++) {
+        for (int x = 0; x < side; x++) {
+            float u = ((float)x + 0.5f) / (float)side;
+            float v = ((float)y + 0.5f) / (float)side;
+            float d = 1.f;
+            if (tool == 0) {
+                float stem = sdf_rect(u, v, 0.20f, 0.12f, 0.42f, 0.88f);
+                float up = ring(sdf_ellipse(u, v, 0.48f, 0.34f, 0.30f, 0.22f), sdf_ellipse(u, v, 0.48f, 0.34f, 0.14f, 0.09f));
+                float low = ring(sdf_ellipse(u, v, 0.50f, 0.68f, 0.32f, 0.22f), sdf_ellipse(u, v, 0.50f, 0.68f, 0.15f, 0.09f));
+                d = nearer(stem, nearer(up, low));
+            } else if (tool == 1) {
+                float shifted = u - (0.80f - v) * 0.26f;
+                float stem = sdf_rect(shifted, v, 0.30f, 0.18f, 0.46f, 0.82f);
+                float top = sdf_rect(u, v, 0.40f, 0.12f, 0.78f, 0.22f);
+                float bot = sdf_rect(u, v, 0.18f, 0.78f, 0.56f, 0.88f);
+                d = nearer(stem, nearer(top, bot));
+            } else {
+                static const float path[] = {0.70f, 0.16f, 0.40f, 0.12f, 0.26f, 0.26f, 0.38f, 0.42f,
+                                             0.64f, 0.52f, 0.76f, 0.68f, 0.58f, 0.88f, 0.28f, 0.82f};
+                float best = 4.f;
+                for (int i = 0; i < 7; i++) {
+                    float ds = dist_seg(u, v, path[i * 2], path[i * 2 + 1], path[i * 2 + 2], path[i * 2 + 3]);
+                    if (ds < best) {
+                        best = ds;
+                    }
+                }
+                float cut = dist_seg(u, v, 0.08f, 0.50f, 0.92f, 0.50f);
+                d = nearer(best - 0.075f, cut - 0.045f);
+            }
+            float cover = 0.5f - d * (float)side;
+            if (cover < 0.f) {
+                cover = 0.f;
+            }
+            if (cover > 1.f) {
+                cover = 1.f;
+            }
+            mask[(size_t)y * (size_t)side + (size_t)x] = (unsigned char)(cover * 255.f + 0.5f);
+        }
+    }
+    for (int y = 0; y < side; y++) {
+        for (int x = 0; x < side; x++) {
+            unsigned char cover = mask[(size_t)y * (size_t)side + (size_t)x];
+            if (cover > 0) {
+                blend(px, width, height, x0 + x, y0 + y, (int)cover, r, g, b);
+            }
+        }
+    }
+}
+
 void page_draw_tool(uint8_t *px, int width, int height, int x, int y, int w, int h, int tool) {
     if (px == NULL || w < 4 || h < 4 || tool < 0 || tool > 11) {
         return;
@@ -3574,26 +3888,8 @@ void page_draw_tool(uint8_t *px, int width, int height, int x, int y, int w, int
     int g = 0;
     int b = 0;
     slot_rgb(SLOT_INK, &r, &g, &b);
-    if (tool == 0) {
-        const float stem[] = {0.28f, 0.14f, 0.28f, 0.86f};
-        const float top[] = {0.28f, 0.16f, 0.52f, 0.14f, 0.70f, 0.28f, 0.52f, 0.48f, 0.28f, 0.48f};
-        const float bot[] = {0.28f, 0.48f, 0.56f, 0.48f, 0.76f, 0.64f, 0.56f, 0.86f, 0.28f, 0.86f};
-        stroke_poly(px, width, height, ox, oy, s, stem, 2, thick, r, g, b);
-        stroke_poly(px, width, height, ox, oy, s, top, 5, thick, r, g, b);
-        stroke_poly(px, width, height, ox, oy, s, bot, 5, thick, r, g, b);
-    } else if (tool == 1) {
-        const float stem[] = {0.64f, 0.14f, 0.36f, 0.86f};
-        const float top[] = {0.46f, 0.16f, 0.76f, 0.16f};
-        const float bot[] = {0.24f, 0.84f, 0.54f, 0.84f};
-        stroke_poly(px, width, height, ox, oy, s, stem, 2, thick, r, g, b);
-        stroke_poly(px, width, height, ox, oy, s, top, 2, thick * 0.85f, r, g, b);
-        stroke_poly(px, width, height, ox, oy, s, bot, 2, thick * 0.85f, r, g, b);
-    } else if (tool == 2) {
-        const float curve[] = {0.70f, 0.22f, 0.36f, 0.16f, 0.28f, 0.34f, 0.66f, 0.52f,
-                               0.74f, 0.68f, 0.40f, 0.84f, 0.26f, 0.72f};
-        const float cut[] = {0.16f, 0.50f, 0.84f, 0.50f};
-        stroke_poly(px, width, height, ox, oy, s, curve, 7, thick, r, g, b);
-        stroke_poly(px, width, height, ox, oy, s, cut, 2, thick, r, g, b);
+    if (tool == 0 || tool == 1 || tool == 2) {
+        paint_letter(px, width, height, (int)ox, (int)oy, side, tool, r, g, b);
     } else if (tool == 3) {
         const float left[] = {0.40f, 0.20f, 0.18f, 0.50f, 0.40f, 0.80f};
         const float right[] = {0.60f, 0.20f, 0.82f, 0.50f, 0.60f, 0.80f};

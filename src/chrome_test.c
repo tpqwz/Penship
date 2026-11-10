@@ -115,7 +115,7 @@ static void test_settings_view(void) {
     expect(chrome.w[CHROME_BOLD] == 0 && chrome.w[CHROME_CODE] == 0, "the formatting bar waits for the page");
     chrome_place(&chrome, width, height, 80, 160, density, 2, 1000, NULL, NULL, 1);
     int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,  CHROME_FONTFILE, CHROME_TYPEWRITER,
-                   CHROME_FOCUS,  CHROME_LINE,   CHROME_SECTIONS, CHROME_GLIDE, CHROME_THEME, CHROME_SOURCE,
+                   CHROME_FOCUS,  CHROME_LINE,   CHROME_SECTIONS, CHROME_BAR, CHROME_GLIDE, CHROME_THEME, CHROME_SOURCE,
                    CHROME_READONLY};
     for (int i = 0; i < (int)(sizeof prefs / sizeof prefs[0]); i++) {
         expect_placed(&chrome, prefs[i], width, height);
@@ -125,7 +125,8 @@ static void test_settings_view(void) {
     expect(strcmp(chrome_label(CHROME_FONTFILE), "Font file") == 0, "font file label");
     expect(chrome.y[CHROME_LINE] > chrome.y[CHROME_FOCUS], "line sits under focus");
     expect(chrome.y[CHROME_SECTIONS] > chrome.y[CHROME_LINE], "sections sits under line");
-    expect(chrome.y[CHROME_GLIDE] > chrome.y[CHROME_SECTIONS], "glide sits under sections");
+    expect(chrome.y[CHROME_BAR] > chrome.y[CHROME_SECTIONS], "bar sits under sections");
+    expect(chrome.y[CHROME_GLIDE] > chrome.y[CHROME_BAR], "glide sits under bar");
     expect(strcmp(chrome_label(CHROME_SECTIONS), "Sections") == 0, "sections label");
     expect(strcmp(chrome_label(CHROME_GLIDE), "Glide") == 0, "glide label");
     expect(strcmp(chrome_label(CHROME_LINE), "Line") == 0, "line label");

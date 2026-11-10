@@ -7,7 +7,7 @@ static const char *k_labels[CHROME_COUNT] = {
     "Open",   "Save",     "Save as", "Export", "Contents", "Smaller", "Larger", "Font", "Typewriter",
     "Focus",  "Line",     "Theme",   "Source", "Menu",     "Done",    "Bold",   "Italic", "Strike", "Code",
     "Link",   "Head",     "List",    "Task",   "Quote",    "Rule",    "Table",  "Block",  "Read only", "Find",
-    "Settings", "Font file", "Glide", "Sections"};
+    "Settings", "Font file", "Glide", "Sections", "Bar"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -202,7 +202,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
                                     CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS};
         static const int k_options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,       CHROME_FONTFILE,
                                        CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_SECTIONS,
-                                       CHROME_GLIDE,
+                                       CHROME_BAR,    CHROME_GLIDE,
                                        CHROME_THEME,
                                        CHROME_SOURCE,  CHROME_READONLY};
         const int *rows = screen == 2 ? k_options : k_menu;

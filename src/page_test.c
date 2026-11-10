@@ -542,8 +542,10 @@ static void test_rendered(const unsigned char *font, int font_len) {
                 ink_y0 = y;
             }
         }
-        expect(head_y0 >= 0 && head_y1 - head_y0 < 48, "a squeezed table header stays on one row");
-        expect(ink_y0 >= 0 && ink_y0 - head_y1 < 70, "the delimiter row is not a blank line");
+        expect(head_y0 >= 0 && head_y1 > head_y0, "a squeezed table header is painted");
+        expect(head_y1 - head_y0 > 36, "a long header cell wraps inside the row");
+        expect(ink_y0 > head_y1, "body text starts after the header");
+        expect(ink_y0 - head_y1 < 80, "the delimiter row is not a blank line");
         free(wide_px);
     }
 

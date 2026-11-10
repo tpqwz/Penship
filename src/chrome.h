@@ -35,7 +35,8 @@ enum {
     CHROME_FONTFILE = 30,
     CHROME_GLIDE = 31,
     CHROME_SECTIONS = 32,
-    CHROME_COUNT = 33
+    CHROME_BAR = 33,
+    CHROME_COUNT = 34
 };
 
 struct Chrome {
