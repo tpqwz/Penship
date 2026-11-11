@@ -5,7 +5,7 @@ A native note on a phone, painted from the markdown you type. This file is the l
 Penship
 ========
 
-A double tap or a press-and-hold selects the word and offers Edit, Copy, and Cut. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close, and a table stays on its own line. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
+A double tap or a press-and-hold selects the word and offers Edit, Copy, and Cut. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close. A table stays a grid: the caret sits in the cell, Tab steps across, and Enter moves down the column. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
 
 ## How to read this note
 
@@ -115,7 +115,7 @@ The wash behind a fence stays even when the ticks are hidden. Put the caret on t
 
 ## What the caret does to a line
 
-Only the line you are on is source. A fence and a table follow that same rule, one line at a time. Step off a line and its ticks, hashes, or pipes disappear. A heading you are not on hides its hashes. A list you are not on hides its hyphen and draws a bullet, a box, or the number you typed. A code span you are not on hides its ticks. Read only hides the marks on the caret line too, and typing does nothing until you turn it off.
+Only the line you are on is source, except a fence, which opens as a whole block, and a table, which stays a grid with the caret in one cell. Step off a line and its ticks or hashes disappear. A heading you are not on hides its hashes. A list you are not on hides its hyphen and draws a bullet, a box, or the number you typed. A code span you are not on hides its ticks. Read only hides the marks on the caret line too, and typing does nothing until you turn it off.
 
 ## Settings
 
@@ -229,7 +229,7 @@ Some paragraphs are for other people. You write them as quotes, one greater-than
 
 The list is the errand. Milk. A battery. The name of the street the shop is on. Ordered items keep the numbers you gave them, because the numbers might be a sequence you meant, not a sequence the editor invented. A task is different. The box is tappable. Checked stays checked until you tap it again. A new line after a checked box starts open, since the next errand is not done.
 
-A table is for the two columns that do not belong in a list. Name, and whether you have it. The header is a heading color when you are not on that line. The grid is rules. Tab moves between the cells. On the last cell it adds a row, which is how the list grows without you typing the pipes by hand. The caret line still shows the pipes. The lines you are not on show the grid. You do not edit a whole table by landing in it. You edit the row you are on.
+A table is for the two columns that do not belong in a list. Name, and whether you have it. The header is a heading color when you are not on that line. The grid is rules. Tab moves between the cells. On the last cell it adds a row, which is how the list grows without you typing the pipes by hand. The grid stays up while you edit. The caret sits in the cell you tapped. Enter moves to the same column on the next row, and on the last row it adds one.
 
 Code is for the command you will forget. One pair of ticks for a word in a sentence. A fence for the three lines you want to keep together. The wash marks the fence even when the ticks are hidden. You step onto the opener when you need to change the language tag, and you step off it when you want to read the command. The body line is its own edit. That is clumsier than opening the whole fence, and it is the rule this note is written to: one line.
 

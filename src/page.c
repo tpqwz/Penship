@@ -959,6 +959,37 @@ static int line_has_pipe(const char *s, size_t n) {
     return 0;
 }
 
+/* Untrimmed spans between pipes. A caret on the padding still belongs to that cell. */
+static int raw_cells(const char *s, size_t n, size_t *lo, size_t *hi, int cap) {
+    size_t i = 0;
+    int count = 0;
+    if (s == NULL || lo == NULL || hi == NULL || cap < 1) {
+        return 0;
+    }
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    if (i < n && s[i] == '|') {
+        i++;
+    }
+    while (count < cap) {
+        lo[count] = i;
+        while (i < n && s[i] != '|') {
+            i++;
+        }
+        hi[count] = i;
+        count++;
+        if (i >= n) {
+            break;
+        }
+        i++;
+        if (i >= n) {
+            break;
+        }
+    }
+    return count;
+}
+
 static int split_row(const char *s, size_t n, size_t *at, size_t *len, int cap) {
     size_t i = 0;
     while (i < n && (s[i] == ' ' || s[i] == '\t')) {
@@ -1634,6 +1665,61 @@ static void paint_caret_band(uint8_t *px, int width, int height, uint32_t row, u
     blend_rect(px, width, height, g_view_x, sy, g_view_w, line_h, sr, sg, sb, 18);
 }
 
+static int glyph_hidden(const char *text, size_t off, size_t len, size_t hide, int source, const uint8_t *mark, size_t at) {
+    if (!source && hide > 0 && at < off + hide) {
+        return 1;
+    }
+    if (!source && mark != NULL && at >= off && at - off < len &&
+        ((mark[at - off] == KIND_STRIKE && text[at] == '~') || mark[at - off] == KIND_SKIP)) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Visible width of [from, to), starting after prev_cp. Hidden marks add nothing. */
+static long long span_width(const char *text, size_t off, size_t len, size_t hide, int source, const uint8_t *mark,
+                            size_t from, size_t to, int prev_cp, float scale, int space_px) {
+    long long width = 0;
+    int prev = prev_cp;
+    int have_prev = prev_cp != 0;
+    size_t i = from;
+    while (i < to) {
+        unsigned cp = 0;
+        int n = utf8_decode(text + i, to - i, &cp);
+        size_t at = i;
+        long long advance = space_px;
+        long long kern = 0;
+        int ax = 0;
+        int lsb = 0;
+        if (n < 0) {
+            i++;
+            continue;
+        }
+        i += (size_t)n;
+        if (glyph_hidden(text, off, len, hide, source, mark, at)) {
+            continue;
+        }
+        if (cp == '\t') {
+            advance = (long long)space_px * 4;
+            prev = 0;
+            have_prev = 0;
+        } else {
+            stbtt_GetCodepointHMetrics(&g_font, (int)cp, &ax, &lsb);
+            advance = (long long)(ax * scale + 0.5f);
+            if (advance < 1) {
+                advance = 1;
+            }
+            if (have_prev) {
+                kern = (long long)(stbtt_GetCodepointKernAdvance(&g_font, prev, (int)cp) * scale);
+            }
+            prev = (int)cp;
+            have_prev = 1;
+        }
+        width += kern + advance;
+    }
+    return width;
+}
+
 static uint32_t layout_line(uint8_t *px, int width, int height, const char *text, size_t off, size_t len,
                             size_t caret, int origin_x, int max_x, int origin_y, int line_h, int baseline,
                             int space_px, float scale, int draw, uint64_t row0, uint64_t scroll, int view_h,
@@ -1644,6 +1730,8 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
     }
     int x = origin_x;
     int prev = 0;
+    int row_x = origin_x;
+    int word_open = 0;
     uint32_t row = 0;
     size_t i = off;
     size_t end = off + len;
@@ -1705,6 +1793,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                         fill_rect(px, width, height, origin_x, sy, bar, line_h, qr, qg, qb);
                     }
                     x = origin_x + bar + space_px;
+                    row_x = x;
                 }
                 if (list) {
                     int side = line_h / 5;
@@ -1734,6 +1823,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                     if (list != 4 && x <= INT_MAX - side - space_px) {
                         x += side + space_px;
                     }
+                    row_x = x;
                 }
             }
         }
@@ -1763,11 +1853,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             continue;
         }
         i += (size_t)n;
-        if (!source && hide > 0 && at < off + hide) {
-            continue;
-        }
-        if (!source && mark != NULL && at >= off && (size_t)(at - off) < len &&
-            ((mark[at - off] == KIND_STRIKE && text[at] == '~') || mark[at - off] == KIND_SKIP)) {
+        if (glyph_hidden(text, off, len, hide, source, mark, at)) {
             continue;
         }
         long long advance = space_px;
@@ -1789,17 +1875,57 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         if (glyph && prev != 0 && x > origin_x) {
             kern = (long long)(stbtt_GetCodepointKernAdvance(&g_font, prev, (int)cp) * scale);
         }
-        if (x > origin_x && (long long)x + kern + advance > max_x) {
+        if (cp == ' ' || cp == '\t') {
+            word_open = 0;
+        } else if (!word_open) {
+            /* Keep the whole word together when it fits on a line of its own. */
+            size_t wend = i;
+            while (wend < end && text[wend] != ' ' && text[wend] != '\t') {
+                unsigned wcp = 0;
+                int wn = utf8_decode(text + wend, end - wend, &wcp);
+                if (wn < 0) {
+                    wend++;
+                    continue;
+                }
+                wend += (size_t)wn;
+            }
+            long long ww = span_width(text, off, len, hide, source, mark, at, wend, prev, scale, space_px);
+            long long room = (long long)max_x - x;
+            int at_left = x == row_x && row_x == origin_x;
+            if (!g_line_clip && !at_left && ww > room) {
+                x = origin_x;
+                if (row < UINT32_MAX) {
+                    row++;
+                }
+                prev = 0;
+                kern = 0;
+                row_x = x;
+                if (caret >= off && caret <= end) {
+                    paint_caret_band(px, width, height, row, row0, line_h, scroll, origin_y);
+                }
+            }
+            word_open = 1;
+        }
+        if (x > row_x && (long long)x + kern + advance > max_x) {
             if (g_line_clip) {
                 break;
             }
+            int space = cp == ' ' || cp == '\t';
             x = origin_x;
             if (row < UINT32_MAX) {
                 row++;
             }
+            prev = 0;
             kern = 0;
+            row_x = x;
+            word_open = space ? 0 : 1;
             if (caret >= off && caret <= end) {
                 paint_caret_band(px, width, height, row, row0, line_h, scroll, origin_y);
+            }
+            if (space) {
+                consider(at, x, (int)row);
+                consider(i, x, (int)row);
+                continue;
             }
         }
         long long draw_x = (long long)x + kern;
@@ -2122,6 +2248,9 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
 
 /* The line index is reused while the note, the width, and the caret stay put.
    A caret move reuses the stored rows and measures only the caret line. */
+static int table_point(const char *text, const struct Index *idx, size_t li, size_t caret, int origin_x, int max_x,
+                       float scale, int space_px, int *out_x, int *out_row);
+
 static int build_index(struct Index *idx, const char *text, size_t text_len, size_t caret, int origin_x, int max_x,
                        int line_h, int space_px, float scale) {
     if (keep_geometry(text, text_len, origin_x, max_x, line_h, space_px, scale) && g_keep_caret == caret) {
@@ -2260,7 +2389,17 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
             if (caret >= line->off && caret <= line->off + line->content) {
                 idx->caret_y = place;
                 if (line->kind == KIND_TABLE) {
-                    idx->caret_x = origin_x;
+                    int cell_x = origin_x;
+                    int cell_row = 0;
+                    if (table_point(text, idx, li, caret, origin_x, max_x, scale, space_px, &cell_x, &cell_row) == 0) {
+                        uint64_t cell_y = place;
+                        idx->caret_x = cell_x;
+                        if (add_rows(place, (uint32_t)cell_row, line_h, &cell_y) == 0) {
+                            idx->caret_y = cell_y;
+                        }
+                    } else {
+                        idx->caret_x = origin_x;
+                    }
                 }
             }
             uint64_t next = 0;
@@ -2692,46 +2831,93 @@ static int text_width(const char *s, size_t n, float scale) {
     return width;
 }
 
-static void fit_columns(int *col_w, int cols, int room) {
-    if (cols < 1) {
+static int longest_word(const char *s, size_t n, float scale) {
+    int best = 0;
+    size_t i = 0;
+    if (s == NULL) {
+        return 0;
+    }
+    while (i < n) {
+        while (i < n && s[i] == ' ') {
+            i++;
+        }
+        size_t start = i;
+        while (i < n && s[i] != ' ') {
+            i++;
+        }
+        if (i > start) {
+            int w = text_width(s + start, i - start, scale);
+            if (w > best) {
+                best = w;
+            }
+        }
+    }
+    return best;
+}
+
+/* want[] is the unwrapped cell width and is replaced with the column width.
+   need[] is the longest word. A word keeps its column when those floors fit. */
+static void fit_columns(int *want, const int *need, int cols, int room) {
+    if (cols < 1 || want == NULL || need == NULL) {
         return;
     }
     int rules = cols + 1;
     int budget = room > rules ? room - rules : cols;
-    int sum = 0;
+    int sum_need = 0;
+    int sum_want = 0;
     for (int c = 0; c < cols; c++) {
-        sum += col_w[c];
+        int floor = need[c];
+        if (floor < 4) {
+            floor = 4;
+        }
+        if (want[c] < floor) {
+            want[c] = floor;
+        }
+        sum_need += floor;
+        sum_want += want[c];
     }
-    if (sum < 1) {
-        sum = 1;
-    }
-    if (sum <= budget) {
+    if (sum_want <= budget) {
         return;
     }
-    int min_w = budget / (cols * 2);
-    if (min_w < 12) {
-        min_w = 12;
+    if (sum_need > budget) {
+        int used = 0;
+        for (int c = 0; c < cols; c++) {
+            int floor = need[c] < 4 ? 4 : need[c];
+            int share = (int)((long long)floor * budget / sum_need);
+            if (share < 4) {
+                share = 4;
+            }
+            want[c] = share;
+            used += share;
+        }
+        if (used != budget) {
+            want[cols - 1] += budget - used;
+            if (want[cols - 1] < 4) {
+                want[cols - 1] = 4;
+            }
+        }
+        return;
     }
-    if (min_w * cols > budget) {
-        min_w = budget / cols;
-    }
-    if (min_w < 4) {
-        min_w = 4;
-    }
-    int flex = budget - min_w * cols;
-    if (flex < 0) {
-        flex = 0;
-    }
+    int flex = sum_want - sum_need;
+    int leftover = budget - sum_need;
     int used = 0;
+    if (flex < 1) {
+        flex = 1;
+    }
     for (int c = 0; c < cols; c++) {
-        int extra = (int)((long long)col_w[c] * flex / sum);
-        col_w[c] = min_w + extra;
-        used += col_w[c];
+        int floor = need[c] < 4 ? 4 : need[c];
+        int extra = want[c] - floor;
+        if (extra < 0) {
+            extra = 0;
+        }
+        want[c] = floor + (int)((long long)extra * leftover / flex);
+        used += want[c];
     }
     if (used != budget) {
-        col_w[cols - 1] += budget - used;
-        if (col_w[cols - 1] < min_w) {
-            col_w[cols - 1] = min_w;
+        want[cols - 1] += budget - used;
+        int floor = need[cols - 1] < 4 ? 4 : need[cols - 1];
+        if (want[cols - 1] < floor) {
+            want[cols - 1] = floor;
         }
     }
 }
@@ -2763,8 +2949,10 @@ static int cell_text_px(int col_w) {
 static void table_metrics(const char *text, const struct Index *idx, size_t from, size_t to, float scale, int room,
                           int *width, int *align, int *cols) {
     int n = 0;
+    int need[TABLE_COLS];
     for (int c = 0; c < TABLE_COLS; c++) {
         width[c] = 0;
+        need[c] = 0;
         align[c] = 0;
     }
     for (size_t li = from; li <= to; li++) {
@@ -2787,9 +2975,16 @@ static void table_metrics(const char *text, const struct Index *idx, size_t from
             n = count;
         }
         for (int c = 0; c < count; c++) {
-            int w = text_width(text + line->off + at[c], len[c], scale) + 16;
-            if (w < 28) {
-                w = 28;
+            int word = longest_word(text + line->off + at[c], len[c], scale) + 32;
+            int w = text_width(text + line->off + at[c], len[c], scale) + 32;
+            if (word < 28) {
+                word = 28;
+            }
+            if (w < word) {
+                w = word;
+            }
+            if (word > need[c]) {
+                need[c] = word;
             }
             if (w > width[c]) {
                 width[c] = w;
@@ -2799,8 +2994,9 @@ static void table_metrics(const char *text, const struct Index *idx, size_t from
     if (n < 1) {
         n = 1;
         width[0] = 28;
+        need[0] = 28;
     }
-    fit_columns(width, n, room);
+    fit_columns(width, need, n, room);
     *cols = n;
 }
 
@@ -2922,9 +3118,119 @@ static void measure_tables(const char *text, struct Index *idx, int origin_x, in
     }
 }
 
+/* Pixel of the caret inside its cell, and the wrap row within that row. 0, or -1. */
+static int table_point(const char *text, const struct Index *idx, size_t li, size_t caret, int origin_x, int max_x,
+                       float scale, int space_px, int *out_x, int *out_row) {
+    const struct Line *line = NULL;
+    size_t from = li;
+    size_t to = li;
+    int col_w[TABLE_COLS];
+    int align[TABLE_COLS];
+    int cols = 0;
+    int room = 0;
+    size_t raw_lo[TABLE_COLS];
+    size_t raw_hi[TABLE_COLS];
+    size_t at[TABLE_COLS];
+    size_t cell_len[TABLE_COLS];
+    int raw_n = 0;
+    int count = 0;
+    int cell = 0;
+    int x = 0;
+    size_t rel = 0;
+    if (text == NULL || idx == NULL || idx->lines == NULL || li >= idx->n || out_x == NULL || out_row == NULL) {
+        return -1;
+    }
+    line = &idx->lines[li];
+    if (line->kind != KIND_TABLE || line->rows == 0) {
+        return -1;
+    }
+    if (caret < line->off || caret > line->off + line->content) {
+        return -1;
+    }
+    while (from > 0 && idx->lines[from - 1].kind == KIND_TABLE) {
+        from--;
+    }
+    while (to + 1 < idx->n && idx->lines[to + 1].kind == KIND_TABLE) {
+        to++;
+    }
+    room = max_x - origin_x;
+    if (room < 32) {
+        room = 32;
+    }
+    table_metrics(text, idx, from, to, scale, room, col_w, align, &cols);
+    if (cols < 1) {
+        return -1;
+    }
+    raw_n = raw_cells(text + line->off, line->content, raw_lo, raw_hi, TABLE_COLS);
+    rel = caret - line->off;
+    for (int c = 0; c < raw_n; c++) {
+        if (rel >= raw_lo[c] && rel <= raw_hi[c]) {
+            cell = c;
+        }
+    }
+    if (cell >= cols) {
+        cell = cols - 1;
+    }
+    x = origin_x + 1;
+    for (int c = 0; c < cell && c < cols; c++) {
+        x += col_w[c];
+    }
+    count = split_row(text + line->off, line->content, at, cell_len, TABLE_COLS);
+    if (cell >= count || cell_len[cell] == 0) {
+        *out_x = x + cell_pad_px(col_w[cell]);
+        *out_row = 0;
+        return 0;
+    }
+    {
+        int pad = cell_pad_px(col_w[cell]);
+        int inner = cell_text_px(col_w[cell]);
+        size_t starts[6];
+        size_t slices[6];
+        int slices_n = pack_words(text, line->off + at[cell], cell_len[cell], inner, scale, starts, slices, 6);
+        int slice = 0;
+        int slice_w = 0;
+        int ox = 0;
+        int cx = 0;
+        int crow = 0;
+        size_t use = caret;
+        if (slices_n < 1) {
+            slices_n = 1;
+            starts[0] = line->off + at[cell];
+            slices[0] = 0;
+        }
+        for (int s = 0; s < slices_n; s++) {
+            if (caret >= starts[s] && caret <= starts[s] + slices[s]) {
+                slice = s;
+            }
+        }
+        if (caret < starts[slice]) {
+            use = starts[slice];
+        }
+        if (caret > starts[slice] + slices[slice]) {
+            use = starts[slice] + slices[slice];
+        }
+        slice_w = text_width(text + starts[slice], slices[slice], scale);
+        ox = x + pad;
+        if (align[cell] == 2 && slice_w < inner) {
+            ox = x + pad + inner - slice_w;
+        } else if (align[cell] == 1 && slice_w < inner) {
+            ox = x + pad + (inner - slice_w) / 2;
+        }
+        g_mute_measures = 1;
+        g_line_clip = 1;
+        layout_line(NULL, 0, 0, text, starts[slice], slices[slice], use, ox, ox + inner, 0, space_px, 0, space_px,
+                    scale, 0, 0, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
+        g_line_clip = 0;
+        g_mute_measures = 0;
+        *out_x = cx;
+        *out_row = slice;
+    }
+    return 0;
+}
+
 static void paint_table_line(uint8_t *px, int width, int height, const char *text, const struct Index *idx, size_t li,
                              int origin_x, int max_x, int origin_y, int line_h, int baseline, float scale, int space_px,
-                             uint64_t row_y, uint64_t scroll, int view_h) {
+                             uint64_t row_y, uint64_t scroll, int view_h, size_t caret) {
     size_t from = li;
     size_t to = li;
     while (from > 0 && idx->lines[from - 1].kind == KIND_TABLE) {
@@ -2979,9 +3285,26 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
     }
     size_t at[TABLE_COLS];
     size_t len[TABLE_COLS];
+    size_t raw_lo[TABLE_COLS];
+    size_t raw_hi[TABLE_COLS];
     int count = split_row(text + line->off, line->content, at, len, TABLE_COLS);
+    int raw_n = raw_cells(text + line->off, line->content, raw_lo, raw_hi, TABLE_COLS);
+    int active = -1;
+    if (caret >= line->off && caret <= line->off + line->content) {
+        size_t rel = caret - line->off;
+        for (int c = 0; c < raw_n; c++) {
+            if (rel >= raw_lo[c] && rel <= raw_hi[c]) {
+                active = c;
+            }
+        }
+    }
     x = origin_x + 1;
     for (int c = 0; c < cols; c++) {
+        if (c == active) {
+            int ir, ig, ib;
+            slot_rgb(SLOT_INK, &ir, &ig, &ib);
+            blend_rect(px, width, height, x, sy, col_w[c] > 1 ? col_w[c] - 1 : 1, box_h, ir, ig, ib, 18);
+        }
         if (c < count && len[c] > 0) {
             int pad = cell_pad_px(col_w[c]);
             int inner = cell_text_px(col_w[c]);
@@ -3002,9 +3325,13 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
                 }
                 int cx = 0;
                 int crow = 0;
+                size_t slice_caret = SIZE_MAX;
+                if (caret >= starts[slice] && caret <= starts[slice] + slices[slice]) {
+                    slice_caret = caret;
+                }
                 g_line_clip = 1;
-                layout_line(px, width, height, text, starts[slice], slices[slice], SIZE_MAX, ox, ox + inner, origin_y,
-                            line_h, baseline, space_px, scale, 1, slice_y, scroll, view_h, 0, 0, 1, NULL,
+                layout_line(px, width, height, text, starts[slice], slices[slice], slice_caret, ox, ox + inner,
+                            origin_y, line_h, baseline, space_px, scale, 1, slice_y, scroll, view_h, 0, 0, 1, NULL,
                             header ? KIND_HEAD : KIND_BODY, &cx, &crow);
                 g_line_clip = 0;
             }
@@ -3300,7 +3627,7 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         }
         if (line.kind == KIND_TABLE && line.rows > 0 && next > scroll && y < window) {
             paint_table_line(px, width, height, text, &idx, li, origin_x, max_x, origin_y, line_h, baseline, scale,
-                             space_px, y, scroll, view_h);
+                             space_px, y, scroll, view_h, caret);
         } else if (line.kind != KIND_TABLE && next > scroll && y < window && line.content > 0) {
             uint8_t *mark = NULL;
             const uint8_t *marks = NULL;
@@ -3369,6 +3696,101 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         int gh = line_h + extra * 2;
         fill_rect(px, width, height, g_sel_x0 - grip / 2, y0, grip, gh, cr, cg, cb);
         fill_rect(px, width, height, g_sel_x1 - grip / 2, y1, grip, gh, cr, cg, cb);
+    }
+}
+
+static size_t table_hit(const char *text, const struct Index *idx, size_t li, int origin_x, int max_x, int line_h,
+                        float scale, int space_px, int x, int hit_row) {
+    const struct Line *line = NULL;
+    size_t from = li;
+    size_t to = li;
+    int col_w[TABLE_COLS];
+    int align[TABLE_COLS];
+    int cols = 0;
+    int room = 0;
+    int col = 0;
+    int cx = 0;
+    size_t at[TABLE_COLS];
+    size_t cell_len[TABLE_COLS];
+    int count = 0;
+    (void)line_h;
+    if (text == NULL || idx == NULL || idx->lines == NULL || li >= idx->n) {
+        return 0;
+    }
+    line = &idx->lines[li];
+    if (line->rows == 0) {
+        return line->off;
+    }
+    while (from > 0 && idx->lines[from - 1].kind == KIND_TABLE) {
+        from--;
+    }
+    while (to + 1 < idx->n && idx->lines[to + 1].kind == KIND_TABLE) {
+        to++;
+    }
+    room = max_x - origin_x;
+    if (room < 32) {
+        room = 32;
+    }
+    table_metrics(text, idx, from, to, scale, room, col_w, align, &cols);
+    if (cols < 1) {
+        return line->off;
+    }
+    cx = origin_x;
+    for (int c = 0; c < cols; c++) {
+        if (x < cx + col_w[c]) {
+            col = c;
+            break;
+        }
+        cx += col_w[c];
+        col = c;
+    }
+    count = split_row(text + line->off, line->content, at, cell_len, TABLE_COLS);
+    if (col >= count || cell_len[col] == 0) {
+        return col < count ? line->off + at[col] : line->off;
+    }
+    {
+        int pad = cell_pad_px(col_w[col]);
+        int inner = cell_text_px(col_w[col]);
+        size_t starts[6];
+        size_t slices[6];
+        int slices_n = pack_words(text, line->off + at[col], cell_len[col], inner, scale, starts, slices, 6);
+        int slice = 0;
+        int slice_w = 0;
+        int ox = 0;
+        int out_x = 0;
+        int out_row = 0;
+        if (slices_n < 1) {
+            return line->off + at[col];
+        }
+        slice = hit_row;
+        if (slice < 0) {
+            slice = 0;
+        }
+        if (slice >= slices_n) {
+            slice = slices_n - 1;
+        }
+        slice_w = text_width(text + starts[slice], slices[slice], scale);
+        ox = cx + 1 + pad;
+        if (align[col] == 2 && slice_w < inner) {
+            ox = cx + 1 + pad + inner - slice_w;
+        } else if (align[col] == 1 && slice_w < inner) {
+            ox = cx + 1 + pad + (inner - slice_w) / 2;
+        }
+        g_seek = 1;
+        g_seek_x = x;
+        g_seek_row = 0;
+        g_seek_at = starts[slice];
+        g_seek_dist = INT_MAX;
+        g_mute_measures = 1;
+        g_line_clip = 1;
+        layout_line(NULL, 0, 0, text, starts[slice], slices[slice], SIZE_MAX, ox, ox + inner, 0, space_px, 0, space_px,
+                    scale, 0, 0, 0, 1, 0, 0, 1, NULL, KIND_BODY, &out_x, &out_row);
+        g_line_clip = 0;
+        g_mute_measures = 0;
+        g_seek = 0;
+        (void)out_x;
+        (void)out_row;
+        return g_seek_at;
     }
 }
 
@@ -3486,6 +3908,15 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     int hit_row = 0;
     if (use_h > 0 && into / (uint64_t)use_h <= (uint64_t)INT_MAX) {
         hit_row = (int)(into / (uint64_t)use_h);
+    }
+    if (line.kind == KIND_TABLE) {
+        size_t at = table_hit(text, &idx, li, origin_x, max_x, line_h, scale, space_px, x, hit_row);
+        free(mark);
+        free(idx.lines);
+        if (at > text_len) {
+            at = text_len;
+        }
+        return at;
     }
     g_seek = 1;
     g_seek_x = x;

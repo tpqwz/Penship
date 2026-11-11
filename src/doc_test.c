@@ -148,6 +148,16 @@ static void test_table_tab(void) {
     expect(doc_load_bytes(doc, "hello", 5) == 0, "leave the table");
     expect(doc_table_tab(doc, 1) == -1, "tab outside a table does nothing");
     doc_free(doc);
+    doc = doc_new();
+    expect(doc_insert(doc, text, strlen(text)) == 0, "insert a table again");
+    doc_place(doc, 2);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter leaves the row intact");
+    expect(strcmp(doc_text(doc, NULL), text) == 0, "enter does not split the table");
+    expect(doc_caret(doc) == 26, "enter moves down the same column");
+    doc_place(doc, 30);
+    expect(doc_insert(doc, "\n", 1) == 0, "enter on the last row adds one");
+    expect(strstr(doc_text(doc, NULL), "| c | d |\n| | |") != NULL, "the new row keeps both columns");
+    doc_free(doc);
 }
 
 static void test_newline_continues_marker(void) {

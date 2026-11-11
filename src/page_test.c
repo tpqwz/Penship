@@ -139,6 +139,64 @@ static void test_hit(const unsigned char *font, int font_len) {
     free(px);
 }
 
+static void test_table_cell(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "table cell font");
+    const int width = 420;
+    const int height = 360;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    const char *text = "| Name | Qty |\n| --- | --- |\n| fig | 2 |\n";
+    size_t n = strlen(text);
+    size_t left = page_hit(0, 0, width, height, text, n, 0, font_px, margin + 8, margin + 8);
+    size_t right = page_hit(0, 0, width, height, text, n, 0, font_px, width - margin - 8, margin + 8);
+    expect(left >= 2 && left <= 6, "a tap on the left cell lands in Name");
+    expect(right >= 9 && right <= 13, "a tap on the right cell lands in Qty");
+}
+
+static void test_word_wrap(const unsigned char *font, int font_len) {
+    expect(page_set_font(font, font_len) == 0, "wrap font");
+    const int width = 140;
+    const int height = 400;
+    const int font_px = 32;
+    int margin = page_margin(font_px);
+    const char *text = "Hello world";
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "wrap buffer");
+    if (px == NULL) {
+        return;
+    }
+    page_set_editing(0);
+    page_set_source(0);
+    page_set_follow(1);
+    page_draw(px, width, height, 0, 0, width, height, text, strlen(text), strlen(text), strlen(text), font_px);
+    int y = -1;
+    int runs = 0;
+    int in_run = 0;
+    for (int row = 0; row < height; row++) {
+        int row_ink = 0;
+        for (int col = 0; col < width; col++) {
+            if (ink_at(px, width, col, row)) {
+                row_ink = 1;
+                break;
+            }
+        }
+        if (row_ink && !in_run) {
+            runs++;
+            if (runs == 2) {
+                y = row + 4;
+            }
+            in_run = 1;
+        }
+        if (!row_ink) {
+            in_run = 0;
+        }
+    }
+    expect(runs >= 2 && y > margin, "Hello world wraps onto a second line");
+    size_t at = page_hit(0, 0, width, height, text, strlen(text), strlen(text), font_px, margin + 4, y);
+    expect(at == 6, "the second line starts at world");
+    free(px);
+}
+
 /* The stars are hidden on a rendered line, so a tap has to land on the letter. */
 static void test_hit_rendered_mark(const unsigned char *font, int font_len) {
     expect(page_set_font(font, font_len) == 0, "rendered hit font");
@@ -549,6 +607,40 @@ static void test_rendered(const unsigned char *font, int font_len) {
         expect(ink_y0 - head_y1 < 80, "the delimiter row is not a blank line");
         free(wide_px);
     }
+    const char *one_word = "| Heading | Ok |\n| --- | --- |\n| a | b |\n";
+    const int word_w = 260;
+    uint8_t *word_px = calloc((size_t)word_w * 400, 4);
+    uint8_t *solo_px = calloc((size_t)word_w * 120, 4);
+    expect(word_px != NULL && solo_px != NULL, "word column buffers");
+    if (word_px != NULL && solo_px != NULL) {
+        int word_right = 0;
+        int cell_right = 0;
+        page_set_editing(0);
+        page_draw(solo_px, word_w, 120, 0, 0, word_w, 120, "Heading", 7, 7, 7, 28);
+        page_draw(word_px, word_w, 400, 0, 0, word_w, 400, one_word, strlen(one_word), strlen(one_word),
+                  strlen(one_word), 28);
+        for (int y = 0; y < 80; y++) {
+            for (int x = 0; x < word_w; x++) {
+                const uint8_t *p = solo_px + ((size_t)y * (size_t)word_w + (size_t)x) * 4;
+                if (p[0] < 80 && p[1] < 80 && p[2] < 80 && x > word_right) {
+                    word_right = x;
+                }
+            }
+        }
+        for (int y = 0; y < 160; y++) {
+            for (int x = 0; x < word_w; x++) {
+                const uint8_t *p = word_px + ((size_t)y * (size_t)word_w + (size_t)x) * 4;
+                if (p[0] > PAGE_HEAD_R - 12 && p[0] < PAGE_HEAD_R + 12 && p[1] > PAGE_HEAD_G - 12 &&
+                    p[1] < PAGE_HEAD_G + 12 && p[2] > PAGE_HEAD_B - 12 && p[2] < PAGE_HEAD_B + 12 && x > cell_right) {
+                    cell_right = x;
+                }
+            }
+        }
+        expect(word_right > 40, "Heading has a measurable width");
+        expect(cell_right + 2 >= word_right, "the Heading column keeps the whole word");
+    }
+    free(word_px);
+    free(solo_px);
 
     const char *struck = "~~H~~\nZ";
     page_draw(px, width, height, 0, 0, width, height, struck, strlen(struck), strlen(struck), strlen(struck), font_px);
@@ -1085,6 +1177,8 @@ int main(void) {
     if (font != NULL) {
         test_caret_and_glyph(font, font_len);
         test_hit(font, font_len);
+        test_word_wrap(font, font_len);
+        test_table_cell(font, font_len);
         test_hit_rendered_mark(font, font_len);
         test_user_scroll(font, font_len);
         test_markdown(font, font_len);
