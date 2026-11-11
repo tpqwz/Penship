@@ -46,7 +46,7 @@ jobs:
             prerelease=(--prerelease)
             kind="Pre-release"
           fi
-          notes="${kind} for commit ${GITHUB_SHA}. The attached archive is the Android package only. penship-android.apk holds the arm64-v8a and x86_64 libraries in one APK. It is signed with a debug keystore created in this build, so a device that already has a different penship signature must uninstall the old package before this one will install."
+          notes="${kind} for commit ${GITHUB_SHA}. The attached file is penship-android.apk, the Android package, with the arm64-v8a and x86_64 libraries. It is signed with a debug keystore created in this build, so a device that already has a different penship signature must uninstall the old package before this one will install."
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" penship-android.apk --clobber
           else

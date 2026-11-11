@@ -44,12 +44,17 @@ build/html_test: src/html.c src/html_test.c src/html.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/html_test.c src/html.c
 
-test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test
+build/fontlist_test: src/fontlist.c src/fontlist_test.c src/fontlist.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/fontlist_test.c src/fontlist.c
+
+test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test build/fontlist_test
 	./build/doc_test
 	./build/page_test
 	./build/chrome_test
 	./build/ime_test
 	./build/html_test
+	./build/fontlist_test
 
 build/obj/%/chrome.o: src/chrome.c src/chrome.h
 	mkdir -p $(dir $@)
@@ -59,7 +64,7 @@ build/obj/%/ime.o: src/ime.c src/ime.h src/utf8.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/ime.c
 
-build/obj/%/main.o: src/main.c src/page.h src/doc.h src/chrome.h src/ime.h src/html.h src/utf8.h
+build/obj/%/main.o: src/main.c src/page.h src/doc.h src/chrome.h src/ime.h src/html.h src/utf8.h src/fontlist.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/main.c
 
@@ -79,7 +84,11 @@ build/obj/%/html.o: src/html.c src/html.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/html.c
 
-build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/glue.o
+build/obj/%/fontlist.o: src/fontlist.c src/fontlist.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/fontlist.c
+
+build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/fontlist.o build/obj/%/glue.o
 	@test -n "$(NDK)" || (echo "NDK not found under $(ANDROID_HOME)/ndk" && exit 1)
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(LDFLAGS) -o $@ $^
@@ -106,9 +115,6 @@ apk: test $(foreach abi,$(ABIS),build/lib/$(abi)/libpenship.so) build/dex/classe
 		--min-sdk-version $(MIN_SDK) --target-sdk-version 36
 	python3 tools/pack_apk.py build/linked.apk build/unaligned.apk \
 		$(foreach abi,$(ABIS),lib/$(abi)/libpenship.so=build/lib/$(abi)/libpenship.so) \
-		assets/LiberationSans-Regular.ttf=assets/LiberationSans-Regular.ttf \
-		assets/LiberationSerif-Regular.ttf=assets/LiberationSerif-Regular.ttf \
-		assets/LiberationMono-Regular.ttf=assets/LiberationMono-Regular.ttf \
 		assets/OFL.txt=assets/OFL.txt \
 		assets/showcase.md=samples/showcase.md \
 		classes.dex=build/dex/classes.dex

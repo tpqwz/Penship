@@ -36,7 +36,9 @@ enum {
     CHROME_GLIDE = 31,
     CHROME_SECTIONS = 32,
     CHROME_BAR = 33,
-    CHROME_COUNT = 34
+    CHROME_GETFACES = 34,
+    CHROME_LISTS = 35,
+    CHROME_COUNT = 36
 };
 
 struct Chrome {
@@ -46,6 +48,12 @@ struct Chrome {
     int y[CHROME_COUNT];
     int w[CHROME_COUNT];
     int h[CHROME_COUNT];
+    /* Settings group titles. head_n is 0 on the page and the file menu. */
+    int head_n;
+    int head_x;
+    int head_w;
+    int head_h;
+    int head_y[4];
 };
 
 /* Place the writing surface, the file menu, or the settings screen.

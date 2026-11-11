@@ -7,7 +7,7 @@ static const char *k_labels[CHROME_COUNT] = {
     "Open",   "Save",     "Save as", "Export", "Contents", "Smaller", "Larger", "Font", "Typewriter",
     "Focus",  "Line",     "Theme",   "Source", "Menu",     "Done",    "Bold",   "Italic", "Strike", "Code",
     "Link",   "Head",     "List",    "Task",   "Quote",    "Rule",    "Table",  "Block",  "Read only", "Find",
-    "Settings", "Font file", "Glide", "Sections", "Bar"};
+    "Settings", "Font file", "Glide", "Sections", "Bar", "Download faces", "Font lists"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -142,6 +142,58 @@ static void place_column(struct Chrome *chrome, const int *rows, int n, int widt
     }
 }
 
+/* Settings is grouped. Each group leaves a band above its first row for a title. */
+static void place_settings(struct Chrome *chrome, int width, int inset_top, int inner, int thumb, int row, int *scroll) {
+    static const int type_rows[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT};
+    static const int face_rows[] = {CHROME_FONTFILE, CHROME_GETFACES, CHROME_LISTS};
+    static const int read_rows[] = {CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE, CHROME_SECTIONS, CHROME_BAR, CHROME_GLIDE};
+    static const int page_rows[] = {CHROME_THEME, CHROME_SOURCE, CHROME_READONLY};
+    static const int *groups[] = {type_rows, face_rows, read_rows, page_rows};
+    static const int counts[] = {3, 3, 6, 3};
+    int head = row / 2;
+    int total = 0;
+    int max_scroll = 0;
+    int at = 0;
+    int span = width;
+    int max_span = thumb * 10;
+    int x0 = 0;
+    int y = 0;
+    if (head < 28) {
+        head = 28;
+    }
+    for (int g = 0; g < 4; g++) {
+        total += head + counts[g] * row;
+    }
+    max_scroll = total > inner ? total - inner : 0;
+    if (scroll != NULL) {
+        at = *scroll;
+        if (at < 0) {
+            at = 0;
+        }
+        if (at > max_scroll) {
+            at = max_scroll;
+        }
+        *scroll = at;
+    }
+    if (max_span > 0 && span > max_span) {
+        span = max_span;
+    }
+    x0 = (width - span) / 2;
+    y = inset_top - at;
+    chrome->head_n = 4;
+    chrome->head_x = x0;
+    chrome->head_w = span;
+    chrome->head_h = head;
+    for (int g = 0; g < 4; g++) {
+        chrome->head_y[g] = y;
+        y += head;
+        for (int i = 0; i < counts[g]; i++) {
+            place_one(chrome, groups[g][i], x0, y, span, row);
+            y += row;
+        }
+    }
+}
+
 /* The menu mark floats at the end, under the status inset. The keyboard covers the bottom. */
 static void place_mark(struct Chrome *chrome, int width, int height, int inset_top, int inset_bottom, int inner,
                        int thumb) {
@@ -191,6 +243,7 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
         inset_bottom = height - inset_top;
     }
     hide_controls(chrome);
+    chrome->head_n = 0;
     chrome->vertical = 0;
     int thumb = thumb_px(density);
     int inner = height - inset_top - inset_bottom;
@@ -200,17 +253,16 @@ void chrome_place(struct Chrome *chrome, int width, int height, int inset_top, i
     if (screen == 1 || screen == 2) {
         static const int k_menu[] = {CHROME_OPEN,   CHROME_SAVE,     CHROME_SAVE_AS, CHROME_EXPORT,
                                     CHROME_CONTENTS, CHROME_FIND,    CHROME_OPTIONS};
-        static const int k_options[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,       CHROME_FONTFILE,
-                                       CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE,     CHROME_SECTIONS,
-                                       CHROME_BAR,    CHROME_GLIDE,
-                                       CHROME_THEME,
-                                       CHROME_SOURCE,  CHROME_READONLY};
-        const int *rows = screen == 2 ? k_options : k_menu;
-        int n = screen == 2 ? (int)(sizeof k_options / sizeof k_options[0]) : (int)(sizeof k_menu / sizeof k_menu[0]);
+        const int *rows = k_menu;
+        int n = (int)(sizeof k_menu / sizeof k_menu[0]);
         place_mark(chrome, width, height, inset_top, inset_bottom, inner, thumb);
         /* The mark floats on the first rows. The list is not pushed down to clear it. */
         int row = chrome_row_px(density, scale_milli);
-        place_column(chrome, rows, n, width, inset_top, inner, thumb, row, scroll);
+        if (screen == 2) {
+            place_settings(chrome, width, inset_top, inner, thumb, row, scroll);
+        } else {
+            place_column(chrome, rows, n, width, inset_top, inner, thumb, row, scroll);
+        }
         chrome->text_x = 0;
         chrome->text_y = 0;
         chrome->text_w = 1;

@@ -41,6 +41,12 @@ public class Pen extends android.app.NativeActivity {
 
     private static native void fontPicked();
 
+    private static native void facesFetched(int ok);
+
+    private static native void listsFetched(int ok);
+
+    private static native void catalogFetched(int ok);
+
     /** Open is 0. Save-as is 1. Export is 2. A font file is 3. */
     public static void pick(Activity activity, int create) {
         activity.runOnUiThread(new Runnable() {
@@ -195,6 +201,604 @@ public class Pen extends android.app.NativeActivity {
                 }
             }
         }
+    }
+
+    private static final String FACE_PACK =
+            "https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz";
+    private static final String[] FACE_FILE = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
+            "LiberationMono-Regular.ttf"};
+    private static volatile boolean fetching;
+
+    /** Download the three regular Liberation faces into app storage. The note stays put. */
+    public static void fetchFaces(Activity activity) {
+        if (fetching) {
+            return;
+        }
+        fetching = true;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final Activity host = activity;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean ok = downloadFaces(host);
+                        fetching = false;
+                        final int code = ok ? 1 : 0;
+                        host.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!host.isFinishing()) {
+                                    facesFetched(code);
+                                }
+                            }
+                        });
+                    }
+                }, "penship-faces").start();
+            }
+        });
+    }
+
+    private static boolean hostOk(String host) {
+        return "github.com".equals(host) || "www.github.com".equals(host) || "objects.githubusercontent.com".equals(host);
+    }
+
+    private static boolean downloadFaces(Activity activity) {
+        java.net.HttpURLConnection conn = null;
+        java.io.InputStream in = null;
+        try {
+            java.net.URL url = new java.net.URL(FACE_PACK);
+            for (int hop = 0; hop < 5; hop++) {
+                if (!hostOk(url.getHost())) {
+                    return false;
+                }
+                conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                int code = conn.getResponseCode();
+                if (code >= 300 && code < 400) {
+                    String loc = conn.getHeaderField("Location");
+                    conn.disconnect();
+                    conn = null;
+                    if (loc == null) {
+                        return false;
+                    }
+                    url = new java.net.URL(url, loc);
+                    continue;
+                }
+                if (code != 200) {
+                    return false;
+                }
+                in = conn.getInputStream();
+                return extractFaces(in, activity.getFilesDir());
+            }
+            return false;
+        } catch (java.io.IOException ignored) {
+            return false;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (java.io.IOException ignored) {
+                }
+            }
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private static int readFull(java.io.InputStream in, byte[] buf, int n) throws java.io.IOException {
+        int got = 0;
+        while (got < n) {
+            int r = in.read(buf, got, n - got);
+            if (r < 0) {
+                return got;
+            }
+            got += r;
+        }
+        return got;
+    }
+
+    private static void skipFull(java.io.InputStream in, long n) throws java.io.IOException {
+        byte[] buf = new byte[8192];
+        while (n > 0) {
+            int chunk = n > buf.length ? buf.length : (int) n;
+            int r = in.read(buf, 0, chunk);
+            if (r < 0) {
+                return;
+            }
+            n -= r;
+        }
+    }
+
+    private static long octal(byte[] header, int at, int n) {
+        long value = 0;
+        for (int i = at; i < at + n; i++) {
+            byte c = header[i];
+            if (c < '0' || c > '7') {
+                break;
+            }
+            value = value * 8 + (c - '0');
+        }
+        return value;
+    }
+
+    private static boolean extractFaces(java.io.InputStream gzip, java.io.File dir) throws java.io.IOException {
+        java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(gzip);
+        byte[] header = new byte[512];
+        boolean[] got = new boolean[FACE_FILE.length];
+        while (readFull(in, header, 512) == 512) {
+            boolean empty = true;
+            for (int i = 0; i < 512; i++) {
+                if (header[i] != 0) {
+                    empty = false;
+                    break;
+                }
+            }
+            if (empty) {
+                break;
+            }
+            int nameEnd = 0;
+            while (nameEnd < 100 && header[nameEnd] != 0) {
+                nameEnd++;
+            }
+            String name = new String(header, 0, nameEnd, java.nio.charset.StandardCharsets.US_ASCII);
+            int slash = name.lastIndexOf('/');
+            String base = slash >= 0 ? name.substring(slash + 1) : name;
+            long size = octal(header, 124, 12);
+            int type = header[156] & 0xff;
+            int which = -1;
+            for (int i = 0; i < FACE_FILE.length; i++) {
+                if (FACE_FILE[i].equals(base)) {
+                    which = i;
+                }
+            }
+            boolean regular = type == '0' || type == 0;
+            if (regular && which >= 0 && size > 0 && size <= FONT_MAX) {
+                java.io.File dest = new java.io.File(dir, FACE_FILE[which]);
+                java.io.File part = new java.io.File(dir, FACE_FILE[which] + ".part");
+                java.io.OutputStream out = new java.io.FileOutputStream(part);
+                byte[] buf = new byte[8192];
+                long left = size;
+                boolean shortRead = false;
+                while (left > 0) {
+                    int chunk = left > buf.length ? buf.length : (int) left;
+                    int r = in.read(buf, 0, chunk);
+                    if (r < 0) {
+                        shortRead = true;
+                        break;
+                    }
+                    out.write(buf, 0, r);
+                    left -= r;
+                }
+                out.close();
+                if (!shortRead && part.renameTo(dest)) {
+                    got[which] = true;
+                } else {
+                    part.delete();
+                }
+            } else if (size > 0) {
+                skipFull(in, size);
+            }
+            long pad = (512 - (size % 512)) % 512;
+            if (pad > 0) {
+                skipFull(in, pad);
+            }
+        }
+        return got[0] && got[1] && got[2];
+    }
+
+    /* Stylesheets on these hosts. rect and grove publish the same kind of list. */
+    private static final String[] LIST_HOST = {"acimwb.grok.me", "tlnotes.grok.me", "hyperbase.grok.me", "rect.grok.me",
+            "grove.grok.me"};
+    private static volatile boolean listing;
+    private static volatile boolean facing;
+
+    /** Fetch each host's face list into files/fontlists.css. Names only; a tap downloads one TrueType. */
+    public static void fetchLists(Activity activity) {
+        if (listing) {
+            return;
+        }
+        listing = true;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final Activity host = activity;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean ok = downloadLists(host);
+                        listing = false;
+                        final int code = ok ? 1 : 0;
+                        host.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!host.isFinishing()) {
+                                    listsFetched(code);
+                                }
+                            }
+                        });
+                    }
+                }, "penship-lists").start();
+            }
+        });
+    }
+
+    /** Download one TrueType for a family named by a list. The sites ship WOFF2, which the painter cannot read. */
+    public static void fetchFace(Activity activity, String name) {
+        if (facing) {
+            return;
+        }
+        if (!familyOk(name)) {
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (!activity.isFinishing()) {
+                        catalogFetched(0);
+                    }
+                }
+            });
+            return;
+        }
+        facing = true;
+        final String family = name;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final Activity host = activity;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean ok = downloadFace(host, family);
+                        facing = false;
+                        final int code = ok ? 1 : 0;
+                        host.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!host.isFinishing()) {
+                                    catalogFetched(code);
+                                }
+                            }
+                        });
+                    }
+                }, "penship-face").start();
+            }
+        });
+    }
+
+    private static boolean familyOk(String name) {
+        int i = 0;
+        if (name == null || name.length() < 1 || name.length() >= 64) {
+            return false;
+        }
+        if (name.charAt(0) == ' ' || name.charAt(0) == '-') {
+            return false;
+        }
+        if (name.charAt(name.length() - 1) == ' ' || name.charAt(name.length() - 1) == '-') {
+            return false;
+        }
+        for (i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c >= 'a' && c <= 'z') {
+                continue;
+            }
+            if (c >= 'A' && c <= 'Z') {
+                continue;
+            }
+            if (c >= '0' && c <= '9') {
+                continue;
+            }
+            if (c == ' ' || c == '-') {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static byte[] httpsGet(String urlString, String host, int max) {
+        java.net.HttpURLConnection conn = null;
+        InputStream in = null;
+        try {
+            java.net.URL url = new java.net.URL(urlString);
+            for (int hop = 0; hop < 5; hop++) {
+                if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null) {
+                    return null;
+                }
+                int port = url.getPort();
+                if ((port != -1 && port != 443) || host == null || !host.equals(url.getHost())) {
+                    return null;
+                }
+                conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(15000);
+                conn.setRequestProperty("User-Agent", "penship/0.1");
+                int code = conn.getResponseCode();
+                if (code >= 300 && code < 400) {
+                    String loc = conn.getHeaderField("Location");
+                    conn.disconnect();
+                    conn = null;
+                    if (loc == null) {
+                        return null;
+                    }
+                    url = new java.net.URL(url, loc);
+                    continue;
+                }
+                if (code != 200) {
+                    return null;
+                }
+                in = conn.getInputStream();
+                return readCap(in, max);
+            }
+            return null;
+        } catch (IOException ignored) {
+            return null;
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private static byte[] readCap(InputStream in, int max) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int total = 0;
+        int n;
+        while (total < max && (n = in.read(buf)) > 0) {
+            int take = n;
+            if (total > max - take) {
+                take = max - total;
+            }
+            if (take > 0) {
+                out.write(buf, 0, take);
+            }
+            total += n;
+        }
+        return out.toByteArray();
+    }
+
+    private static void appendFamilies(StringBuilder out, String href) {
+        int p = 0;
+        while (p >= 0 && p < href.length()) {
+            int at = href.indexOf("family=", p);
+            int end = 0;
+            String raw;
+            String name;
+            if (at < 0) {
+                break;
+            }
+            at += 7;
+            end = at;
+            while (end < href.length()) {
+                char c = href.charAt(end);
+                if (c == '&' || c == ':' || c == '#') {
+                    break;
+                }
+                end++;
+            }
+            raw = href.substring(at, end).replace('+', ' ');
+            name = raw.trim();
+            if (familyOk(name)) {
+                out.append("@font-face{font-family:\"").append(name).append("\";}\n");
+            }
+            p = end + 1;
+        }
+    }
+
+    private static boolean downloadLists(Activity activity) {
+        StringBuilder css = new StringBuilder();
+        File dir = activity.getFilesDir();
+        File part = new File(dir, "fontlists.css.part");
+        File dest = new File(dir, "fontlists.css");
+        int h = 0;
+        for (h = 0; h < LIST_HOST.length && css.length() < 700000; h++) {
+            String host = LIST_HOST[h];
+            byte[] html = httpsGet("https://" + host + "/", host, 200000);
+            String text;
+            int from = 0;
+            int sheets = 0;
+            if (html == null || html.length == 0) {
+                continue;
+            }
+            text = new String(html, java.nio.charset.StandardCharsets.UTF_8);
+            css.append("/* penship-host: ").append(host, 0, host.indexOf('.')).append(" */\n");
+            while (sheets < 4 && css.length() < 700000 && (from = text.indexOf("href=\"", from)) >= 0) {
+                int start = from + 6;
+                int end = text.indexOf('"', start);
+                String href;
+                String abs = null;
+                if (end < 0) {
+                    break;
+                }
+                href = text.substring(start, end).replace("&amp;", "&");
+                from = end + 1;
+                if (href.contains("fonts.googleapis.com/css")) {
+                    appendFamilies(css, href);
+                    continue;
+                }
+                if (!href.contains(".css")) {
+                    continue;
+                }
+                if (href.startsWith("https://" + host + "/")) {
+                    abs = href;
+                } else if (href.startsWith("/") && !href.startsWith("//")) {
+                    abs = "https://" + host + href;
+                }
+                if (abs == null || abs.indexOf(' ') >= 0) {
+                    continue;
+                }
+                byte[] body = httpsGet(abs, host, 200000);
+                sheets++;
+                if (body == null || body.length == 0) {
+                    continue;
+                }
+                css.append(new String(body, java.nio.charset.StandardCharsets.UTF_8));
+                css.append('\n');
+            }
+        }
+        if (css.length() == 0) {
+            return false;
+        }
+        try {
+            OutputStream raw = new FileOutputStream(part);
+            raw.write(css.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            raw.close();
+        } catch (IOException ignored) {
+            part.delete();
+            return false;
+        }
+        if (!part.renameTo(dest)) {
+            part.delete();
+            return false;
+        }
+        return true;
+    }
+
+    private static String cssUrl(String family) {
+        StringBuilder q = new StringBuilder();
+        int i = 0;
+        for (i = 0; i < family.length(); i++) {
+            char c = family.charAt(i);
+            q.append(c == ' ' ? '+' : c);
+        }
+        return "https://fonts.googleapis.com/css2?family=" + q + ":wght@400&display=swap";
+    }
+
+    private static boolean ttfUrlOk(String url) {
+        int i = 0;
+        if (url == null || !url.startsWith("https://fonts.gstatic.com/") || !url.contains(".ttf") || url.length() > 400) {
+            return false;
+        }
+        for (i = 0; i < url.length(); i++) {
+            char c = url.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                continue;
+            }
+            if (c == '/' || c == ':' || c == '.' || c == '-' || c == '_' || c == '%') {
+                continue;
+            }
+            return false;
+        }
+        return url.indexOf("..") < 0;
+    }
+
+    private static String urlBefore(String css, int fmt) {
+        int url = css.lastIndexOf("url(", fmt);
+        int start = 0;
+        int end = 0;
+        if (url < 0 || fmt - url > 500) {
+            return null;
+        }
+        start = url + 4;
+        end = start;
+        while (end < css.length() && end < fmt) {
+            char c = css.charAt(end);
+            if (c == ')' || c == '\'' || c == '"' || c == ' ' || c == '\n') {
+                break;
+            }
+            end++;
+        }
+        if (end <= start) {
+            return null;
+        }
+        String found = css.substring(start, end);
+        return ttfUrlOk(found) ? found : null;
+    }
+
+    private static String ttfFromCss(String css) {
+        String fallback = null;
+        int from = 0;
+        if (css == null) {
+            return null;
+        }
+        while (from < css.length()) {
+            int fmt = css.indexOf("truetype", from);
+            String url;
+            if (fmt < 0) {
+                break;
+            }
+            url = urlBefore(css, fmt);
+            if (url != null) {
+                int win = fmt - 240;
+                String prev;
+                if (win < 0) {
+                    win = 0;
+                }
+                prev = css.substring(win, fmt);
+                if (prev.contains("latin") || prev.contains("U+0000-00FF")) {
+                    return url;
+                }
+                if (fallback == null) {
+                    fallback = url;
+                }
+            }
+            from = fmt + 8;
+        }
+        return fallback;
+    }
+
+    private static String trueTypeFor(String family) {
+        byte[] css = httpsGet(cssUrl(family), "fonts.googleapis.com", 100000);
+        String url = css == null ? null : ttfFromCss(new String(css, java.nio.charset.StandardCharsets.UTF_8));
+        String shorter = null;
+        if (url != null) {
+            return url;
+        }
+        if (family.endsWith(" Variable") && family.length() > 9) {
+            shorter = family.substring(0, family.length() - 9);
+        } else if (family.endsWith(" Var") && family.length() > 4) {
+            shorter = family.substring(0, family.length() - 4);
+        }
+        if (shorter == null || shorter.endsWith(" ") || !familyOk(shorter)) {
+            return null;
+        }
+        css = httpsGet(cssUrl(shorter), "fonts.googleapis.com", 100000);
+        return css == null ? null : ttfFromCss(new String(css, java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static boolean downloadFace(Activity activity, String family) {
+        String url = trueTypeFor(family);
+        byte[] body;
+        File dir = activity.getFilesDir();
+        File part = new File(dir, "catalog.ttf.part");
+        File namePart = new File(dir, "catalog.name.part");
+        if (url == null) {
+            return false;
+        }
+        body = httpsGet(url, "fonts.gstatic.com", FONT_MAX);
+        if (body == null || body.length < 12) {
+            return false;
+        }
+        boolean ttf = (body[0] == 0 && body[1] == 1 && body[2] == 0 && body[3] == 0)
+                || (body[0] == 't' && body[1] == 'r' && body[2] == 'u' && body[3] == 'e')
+                || (body[0] == 'O' && body[1] == 'T' && body[2] == 'T' && body[3] == 'O');
+        if (!ttf) {
+            return false;
+        }
+        try {
+            OutputStream raw = new FileOutputStream(part);
+            raw.write(body);
+            raw.close();
+            OutputStream name = new FileOutputStream(namePart);
+            name.write(family.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            name.write('\n');
+            name.close();
+        } catch (IOException ignored) {
+            part.delete();
+            namePart.delete();
+            return false;
+        }
+        return true;
     }
 
     static final String IME_TAG = "penship-ime";

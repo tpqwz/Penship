@@ -3034,9 +3034,52 @@ static int find_line(const struct Index *idx, size_t byte, size_t *li) {
     return 0;
 }
 
-/* Normal mode shows marks on the caret line only. Read only shows none. Source shows all. */
-static int line_is_source(const struct Index *idx, size_t li, size_t caret_li) {
-    (void)idx;
+/* The fence that contains caret_li, including its opening and closing lines.
+   An unclosed fence runs through the last line. Returns 0 when the caret is outside one. */
+static int fence_around(const char *text, size_t text_len, const struct Index *idx, size_t caret_li, size_t *lo,
+                        size_t *hi) {
+    int fence = 0;
+    size_t start = 0;
+    if (text == NULL || idx == NULL || idx->lines == NULL || caret_li >= idx->n) {
+        return 0;
+    }
+    for (size_t i = 0; i < idx->n; i++) {
+        const struct Line *line = &idx->lines[i];
+        int marker = 0;
+        if (line->content > 0 && line->off < text_len && line->content <= text_len - line->off) {
+            marker = is_fence(text + line->off, line->content);
+        }
+        if (fence == 0) {
+            if (marker != 0) {
+                fence = marker;
+                start = i;
+            }
+            continue;
+        }
+        if (marker != fence) {
+            continue;
+        }
+        if (caret_li >= start && caret_li <= i) {
+            *lo = start;
+            *hi = i;
+            return 1;
+        }
+        fence = 0;
+    }
+    if (fence != 0 && caret_li >= start) {
+        *lo = start;
+        *hi = idx->n - 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Normal mode shows marks on the caret line. A code fence is the whole block, from the
+   opening marks through the matching close, so a line inside it is not edited alone.
+   Read only shows none. Source shows all. */
+static int line_is_source(const char *text, size_t text_len, const struct Index *idx, size_t li, size_t caret_li) {
+    size_t lo = 0;
+    size_t hi = 0;
     if (g_readonly) {
         return 0;
     }
@@ -3046,7 +3089,10 @@ static int line_is_source(const struct Index *idx, size_t li, size_t caret_li) {
     if (!g_editing) {
         return 0;
     }
-    return li == caret_li;
+    if (li == caret_li) {
+        return 1;
+    }
+    return fence_around(text, text_len, idx, caret_li, &lo, &hi) && li >= lo && li <= hi;
 }
 
 /* A quiet thumb at the right of the column. Hidden when the note fits. */
@@ -3235,7 +3281,7 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         if ((uint64_t)line_h <= UINT64_MAX - window) {
             window += (uint64_t)line_h;
         }
-        int source = line_is_source(&idx, li, caret_li);
+        int source = line_is_source(text, text_len, &idx, li, caret_li);
         g_dim = g_focus && !source && li != caret_li;
         if (line.kind == KIND_CODE && next > scroll && y < window) {
             for (uint32_t row = 0; row < line.rows; row++) {
@@ -3420,7 +3466,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
         }
     }
     struct Line line = idx.lines[li];
-    int source = line_is_source(&idx, li, caret_li);
+    int source = line_is_source(text, text_len, &idx, li, caret_li);
     uint8_t *mark = NULL;
     const uint8_t *marks = NULL;
     if (!source && line.kind == KIND_BODY && line.content > 0 && line.content <= (1u << 18)) {

@@ -114,7 +114,8 @@ static void test_settings_view(void) {
     expect(chrome.w[CHROME_SMALLER] == 0 && chrome.w[CHROME_FONT] == 0, "preferences wait on their own screen");
     expect(chrome.w[CHROME_BOLD] == 0 && chrome.w[CHROME_CODE] == 0, "the formatting bar waits for the page");
     chrome_place(&chrome, width, height, 80, 160, density, 2, 1000, NULL, NULL, 1);
-    int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,  CHROME_FONTFILE, CHROME_TYPEWRITER,
+    int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,  CHROME_FONTFILE, CHROME_GETFACES, CHROME_LISTS,
+                   CHROME_TYPEWRITER,
                    CHROME_FOCUS,  CHROME_LINE,   CHROME_SECTIONS, CHROME_BAR, CHROME_GLIDE, CHROME_THEME, CHROME_SOURCE,
                    CHROME_READONLY};
     for (int i = 0; i < (int)(sizeof prefs / sizeof prefs[0]); i++) {
@@ -122,6 +123,11 @@ static void test_settings_view(void) {
     }
     expect(chrome.w[CHROME_OPEN] == 0 && chrome.w[CHROME_FIND] == 0, "the file menu waits behind settings");
     expect(chrome.y[CHROME_FONTFILE] > chrome.y[CHROME_FONT], "font file sits under font");
+    expect(chrome.y[CHROME_GETFACES] > chrome.y[CHROME_FONTFILE], "download sits under font file");
+    expect(chrome.y[CHROME_LISTS] > chrome.y[CHROME_GETFACES], "font lists sits under download");
+    expect(strcmp(chrome_label(CHROME_GETFACES), "Download faces") == 0, "download faces label");
+    expect(strcmp(chrome_label(CHROME_LISTS), "Font lists") == 0, "font lists label");
+    expect(chrome.head_n == 4, "settings has four group titles");
     expect(strcmp(chrome_label(CHROME_FONTFILE), "Font file") == 0, "font file label");
     expect(chrome.y[CHROME_LINE] > chrome.y[CHROME_FOCUS], "line sits under focus");
     expect(chrome.y[CHROME_SECTIONS] > chrome.y[CHROME_LINE], "sections sits under line");

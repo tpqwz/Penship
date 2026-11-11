@@ -460,8 +460,9 @@ static void test_rendered(const unsigned char *font, int font_len) {
     page_draw(px, width, height, 0, 0, width, height, fence, strlen(fence), strlen(fence), strlen(fence), font_px);
     page_set_editing(0);
     int fence_rendered = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
-    expect(fence_open > fence_line, "a fence shows marks only on the caret line");
-    expect(fence_rendered > 0 && fence_rendered < fence_open, "rendered fence hides the ticks");
+    expect(fence_open > fence_rendered, "the opening line shows the fence ticks");
+    expect(fence_line > fence_rendered, "an inner line keeps the whole code block open");
+    expect(fence_rendered > 0 && fence_rendered < fence_open, "a caret outside the fence hides the ticks");
     expect(page_same_unit(fence, strlen(fence), 0, 4) == 1, "a fence is one segment");
     expect(page_same_unit(head, strlen(head), 0, strlen(head)) == 0, "two lines are two segments");
     expect(near_rgb(px, width, height, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B), "rendered fence keeps the wash");
@@ -597,7 +598,7 @@ static void test_rendered(const unsigned char *font, int font_len) {
     int tilde_open = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
     page_draw(px, width, height, 0, 0, width, height, tilde, strlen(tilde), 4, 4, font_px);
     int tilde_line = count_near(px, width, height, PAGE_CODE_R, PAGE_CODE_G, PAGE_CODE_B);
-    expect(tilde_line > 0 && tilde_line < tilde_open, "a tilde fence shows marks only on the caret line");
+    expect(tilde_line > 0 && tilde_line >= tilde_open, "a tilde fence stays open on an inner line");
 
     const char *flat = "- H\nZ";
     const char *nested = "    - H\nZ";
