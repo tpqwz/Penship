@@ -30,10 +30,10 @@
         android:debuggable="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:label="penship">
+        android:label="Penship">
         <activity
             android:name="penship.Pen"
-            android:label="penship"
+            android:label="Penship"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density"
             android:launchMode="singleTask">

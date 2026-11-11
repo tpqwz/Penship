@@ -37,12 +37,12 @@ jobs:
           short="${GITHUB_SHA::7}"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             tag="$GITHUB_REF_NAME"
-            title="penship ${tag}"
+            title="Penship ${tag}"
             prerelease=()
             kind="Release"
           else
             tag="alpha-${GITHUB_SHA}"
-            title="penship 0.1.3-alpha (${short})"
+            title="Penship 0.1.3-alpha (${short})"
             prerelease=(--prerelease)
             kind="Pre-release"
           fi

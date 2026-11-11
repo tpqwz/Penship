@@ -1,6 +1,6 @@
-# penship
+# Penship
 
-A native Android markdown editor. The name is penship for now. This is **0.1.3-alpha**.
+A native Android markdown editor. This is **0.1.3-alpha**.
 
 ![The sample, rendered, with the menu mark](docs/writing.png)
 
@@ -36,4 +36,4 @@ make
 make install
 ```
 
-The package is `app.penship`. The launcher label is penship. The debug APK is signed with a keystore under `build/`, which is not part of the tree.
+The package is `app.penship`. The launcher label is Penship. The debug APK is signed with a keystore under `build/`, which is not part of the tree.
