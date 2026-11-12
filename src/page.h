@@ -51,6 +51,8 @@ enum {
 
 /* Day palette is 0. Night palette is 1. */
 void page_set_theme(int theme);
+/* Current theme. which 0 is paper, 1 is the rule, 2 is the block. */
+void page_ui_rgb(int which, int *r, int *g, int *b);
 void page_set_typewriter(int on);
 void page_set_focus(int on);
 void page_set_line(int on);
@@ -113,6 +115,9 @@ int page_bar_cover(void);
 /* ttf must stay alive for every later page_draw. Returns 0, or -1 if it is not a TrueType font. */
 int page_set_font(const unsigned char *ttf, int len);
 
+/* which 1 is bold and 2 is italic. A null file clears that face and strong or emphasis falls back. */
+int page_set_style(int which, const unsigned char *ttf, int len);
+
 /* Inset of the text inside the content box. */
 int page_margin(int font_px);
 
@@ -161,8 +166,14 @@ int page_center_drag(int dy);
 /* True when the point is close to the caret drawn by the last page_draw. */
 int page_caret_near(int x, int y, int slop);
 
+/* Caret bar from the last page_draw. Returns 0, or -1 before the first draw. */
+int page_caret_box(int *x, int *y, int *h);
+
 /* Ends of the selection drawn by the last page_draw. Returns 0, or -1 when there is no selection on screen. */
 int page_sel_ends(int *x0, int *y0, int *x1, int *y1, int *h);
+
+/* Copy the http(s) address of the link that contains at. Returns 0, or -1. */
+int page_link_url(const char *text, size_t len, size_t at, char *out, size_t cap);
 
 /* 0 when the point is on the start edge, 1 on the end edge, or -1. */
 int page_sel_edge(int x, int y, int slop);
@@ -173,6 +184,9 @@ int page_drag_kind(int past_slop, int held, int near_caret, int typewriter);
 
 /* -1 when y is in the top zone, 1 in the bottom zone, otherwise 0. */
 int page_edge(int y, int top, int bottom, int zone);
+
+/* Opaque paper with a rule frame. rows above 1 also rules between equal rows. */
+void page_draw_plate(uint8_t *px, int width, int height, int x, int y, int w, int h, int rows);
 
 /* Draw short labels inside the given cells. A wide layout draws the hairline on the right.
    An empty label draws nothing. Pixels outside clip_top and clip_bottom are left alone. */

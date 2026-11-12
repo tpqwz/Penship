@@ -106,33 +106,6 @@ static int locate(const Doc *doc, size_t at, size_t *pi, size_t *inner) {
     return -1;
 }
 
-static int flatten(Doc *doc) {
-    if (doc->cap < doc->len + 1) {
-        size_t cap = doc->cap < 64 ? 64 : doc->cap;
-        while (cap < doc->len + 1) {
-            if (cap > SIZE_MAX / 2) {
-                return -1;
-            }
-            cap *= 2;
-        }
-        char *bytes = realloc(doc->bytes, cap);
-        if (bytes == NULL) {
-            return -1;
-        }
-        doc->bytes = bytes;
-        doc->cap = cap;
-    }
-    size_t off = 0;
-    for (size_t i = 0; i < doc->npiece; i++) {
-        if (doc->piece[i].len > 0) {
-            memcpy(doc->bytes + off, doc->piece[i].data, doc->piece[i].len);
-            off += doc->piece[i].len;
-        }
-    }
-    doc->bytes[off] = '\0';
-    return 0;
-}
-
 Doc *doc_new(void) {
     Doc *doc = calloc(1, sizeof *doc);
     if (doc == NULL) {
@@ -326,6 +299,7 @@ static int splice(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
     if (at > doc->len || cut > doc->len - at || n > SIZE_MAX - (doc->len - cut) - 1) {
         return -1;
     }
+    size_t old_len = doc->len;
     size_t new_len = doc->len - cut + n;
     if (rope_cut(doc, at, cut) != 0) {
         return -1;
@@ -341,8 +315,31 @@ static int splice(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
         left -= chunk;
     }
     doc->len = new_len;
-    if (flatten(doc) != 0) {
-        return -1;
+    /* The leaves already hold the edit. Move only the flat tail the painter reads. */
+    if (doc->cap < new_len + 1) {
+        size_t cap = doc->cap < 64 ? 64 : doc->cap;
+        while (cap < new_len + 1) {
+            if (cap > SIZE_MAX / 2) {
+                return -1;
+            }
+            cap *= 2;
+        }
+        char *grown = realloc(doc->bytes, cap);
+        if (grown == NULL) {
+            return -1;
+        }
+        doc->bytes = grown;
+        doc->cap = cap;
+    }
+    {
+        size_t tail = old_len - (at + cut);
+        if (tail > 0 && n != cut) {
+            memmove(doc->bytes + at + n, doc->bytes + at + cut, tail);
+        }
+        if (n > 0 && in != NULL) {
+            memcpy(doc->bytes + at, in, n);
+        }
+        doc->bytes[new_len] = '\0';
     }
     return 0;
 }
@@ -1406,6 +1403,136 @@ static int table_down(Doc *doc) {
         }
         doc_place(doc, land);
     }
+    return 0;
+}
+
+static int pipe_at(const char *s, size_t n, size_t *at, int cap) {
+    int count = 0;
+    if (s == NULL || at == NULL || cap < 1) {
+        return 0;
+    }
+    for (size_t i = 0; i < n && count < cap; i++) {
+        if (s[i] == '|') {
+            at[count++] = i;
+        }
+    }
+    return count;
+}
+
+int doc_table_column(Doc *doc, int dir) {
+    size_t caret = 0;
+    size_t line = 0;
+    size_t lend = 0;
+    size_t first = 0;
+    size_t last = 0;
+    size_t scan = 0;
+    int index = 0;
+    int cols = 0;
+    int saw = 0;
+    size_t pipes[12];
+    int np = 0;
+    if (doc == NULL || doc->bytes == NULL || (dir != 1 && dir != -1)) {
+        return -1;
+    }
+    caret = doc->caret;
+    if (caret > doc->len) {
+        caret = doc->len;
+    }
+    line = caret;
+    while (line > 0 && doc->bytes[line - 1] != '\n') {
+        line--;
+    }
+    lend = line;
+    while (lend < doc->len && doc->bytes[lend] != '\n') {
+        lend++;
+    }
+    if (!line_has_pipe(doc->bytes + line, lend - line)) {
+        return -1;
+    }
+    np = pipe_at(doc->bytes + line, lend - line, pipes, 12);
+    if (np < 2) {
+        return -1;
+    }
+    cols = np - 1;
+    for (int c = 0; c + 1 < np; c++) {
+        if (line + pipes[c] <= caret) {
+            index = c;
+        }
+    }
+    if (index >= cols) {
+        index = cols - 1;
+    }
+    if (dir < 0 && cols < 2) {
+        return -1;
+    }
+    first = line;
+    while (first > 0) {
+        size_t prev_end = first - 1;
+        size_t prev = prev_end;
+        while (prev > 0 && doc->bytes[prev - 1] != '\n') {
+            prev--;
+        }
+        if (!line_has_pipe(doc->bytes + prev, prev_end - prev)) {
+            break;
+        }
+        first = prev;
+    }
+    last = line;
+    scan = lend;
+    while (scan < doc->len && doc->bytes[scan] == '\n') {
+        size_t next = scan + 1;
+        size_t next_end = next;
+        while (next_end < doc->len && doc->bytes[next_end] != '\n') {
+            next_end++;
+        }
+        if (!line_has_pipe(doc->bytes + next, next_end - next)) {
+            break;
+        }
+        last = next;
+        scan = next_end;
+    }
+    /* Edit the bottom row first so the rows above keep their offsets. */
+    scan = last;
+    while (!saw || scan >= first) {
+        size_t end = scan;
+        size_t row_pipes[12];
+        int row_n = 0;
+        int delim_n = 0;
+        int is_delim = 0;
+        while (end < doc->len && doc->bytes[end] != '\n') {
+            end++;
+        }
+        is_delim = row_is_delim(doc->bytes + scan, end - scan, &delim_n);
+        row_n = pipe_at(doc->bytes + scan, end - scan, row_pipes, 12);
+        if (row_n >= index + 2) {
+            if (dir > 0) {
+                const char *insert = is_delim ? " --- |" : " |";
+                size_t n = is_delim ? 6 : 2;
+                size_t at = scan + row_pipes[index + 1] + 1;
+                if (edit(doc, at, 0, insert, n) != 0) {
+                    return -1;
+                }
+            } else if (index + 1 < row_n) {
+                size_t from = scan + row_pipes[index];
+                size_t to = scan + row_pipes[index + 1];
+                if (to > from && edit(doc, from, to - from, "", 0) != 0) {
+                    return -1;
+                }
+            }
+        }
+        if (scan == first) {
+            break;
+        }
+        if (scan == 0) {
+            break;
+        }
+        scan--;
+        while (scan > 0 && doc->bytes[scan - 1] != '\n') {
+            scan--;
+        }
+        saw = 1;
+    }
+    (void)cols;
     return 0;
 }
 

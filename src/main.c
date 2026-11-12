@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,14 @@ static const char *FRAG =
     "}\n";
 
 enum { SESSION_NONE = 0, SESSION_NOTE = 1, SESSION_URI = 2, SESSION_FAILED = 3 };
+enum { PICKED_MAX = 12, LISTS_ROWS = FONT_LIST_MAX + PICKED_MAX + 2 };
+
+struct App;
+
+static void load_picked(struct App *app);
+static void remember_picked(struct App *app);
+static int apply_picked(struct App *app, int slot);
+static void read_custom_name(struct App *app);
 
 struct App {
     struct android_app *android;
@@ -67,9 +76,17 @@ struct App {
     int session;
     unsigned char *fonts[3];
     int font_lens[3];
+    unsigned char *bold_ttf;
+    int bold_len;
+    unsigned char *italic_ttf;
+    int italic_len;
     unsigned char *custom;
     int custom_len;
     char font_path[512];
+    char custom_name[FONT_NAME_MAX];
+    int picked_n;
+    int picked_slot[PICKED_MAX];
+    char picked_name[PICKED_MAX][FONT_NAME_MAX];
     int glide;
     float glide_v;
     float glide_carry;
@@ -82,11 +99,12 @@ struct App {
     int got_face[3];
     int system_font;
     int fetching;
+    int face_failed;
     int lists;
     int lists_scroll;
     int lists_n;
     int lists_row_h;
-    int lists_row_y[FONT_LIST_MAX + 2];
+    int lists_row_y[LISTS_ROWS];
     int list_n;
     int list_busy;
     int listing;
@@ -363,35 +381,54 @@ static void contents_show(struct App *app, uint8_t *px, int width, int height, i
 
 static void lists_show(struct App *app, uint8_t *px, int width, int height, int top, int bottom, int label_px,
                        int row_h) {
-    const char *labels[FONT_LIST_MAX + 2];
-    int ys[FONT_LIST_MAX + 2];
-    int hs[FONT_LIST_MAX + 2];
-    int xs[FONT_LIST_MAX + 2];
-    int ws[FONT_LIST_MAX + 2];
+    const char *labels[LISTS_ROWS];
+    int ys[LISTS_ROWS];
+    int hs[LISTS_ROWS];
+    int xs[LISTS_ROWS];
+    int ws[LISTS_ROWS];
     char busy_label[FONT_NAME_MAX + 8];
     int rows = 0;
     int i = 0;
+    int picked = 0;
+    int base = 1;
     if (row_h < 1) {
         row_h = 1;
     }
     labels[0] = app->list_banner[0] != '\0' ? app->list_banner : "Faces";
+    picked = app->picked_n;
+    if (picked < 0) {
+        picked = 0;
+    }
+    if (picked > PICKED_MAX) {
+        picked = PICKED_MAX;
+    }
+    for (i = 0; i < picked && base < LISTS_ROWS; i++) {
+        labels[base++] = app->picked_name[i];
+    }
     if (app->list_n <= 0) {
-        labels[1] = app->listing ? "Fetching lists" : "No faces";
-        rows = 2;
+        if (app->listing && base < LISTS_ROWS) {
+            labels[base++] = "Fetching lists";
+        } else if (picked == 0 && base < LISTS_ROWS) {
+            labels[base++] = "No faces";
+        }
+        rows = base;
     } else {
         int n = app->list_n;
         if (n > FONT_LIST_MAX) {
             n = FONT_LIST_MAX;
         }
+        if (n > LISTS_ROWS - base) {
+            n = LISTS_ROWS - base;
+        }
         for (i = 0; i < n; i++) {
             if (i == app->list_busy) {
                 snprintf(busy_label, sizeof busy_label, "%s...", app->list_name[i]);
-                labels[i + 1] = busy_label;
+                labels[base + i] = busy_label;
             } else {
-                labels[i + 1] = app->list_name[i];
+                labels[base + i] = app->list_name[i];
             }
         }
-        rows = n + 1;
+        rows = base + n;
     }
     if (chrome_stack(ys, hs, rows, top, bottom, row_h, &app->lists_scroll) != 0) {
         app->lists_n = 0;
@@ -541,8 +578,16 @@ static void wheel_show(struct App *app, uint8_t *px, int width, int height, int 
         app->wheel_scroll = max_scroll;
     }
     app->wheel_band_y = band_y;
-    fill_box(px, width, height, 0, top, width, bottom - top, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B);
-    fill_box(px, width, height, 0, band_y, width, row_h, PAGE_BLOCK_R, PAGE_BLOCK_G, PAGE_BLOCK_B);
+    int pr = 0;
+    int pg = 0;
+    int pb = 0;
+    int br = 0;
+    int bg = 0;
+    int bb = 0;
+    page_ui_rgb(0, &pr, &pg, &pb);
+    page_ui_rgb(2, &br, &bg, &bb);
+    fill_box(px, width, height, 0, top, width, bottom - top, pr, pg, pb);
+    fill_box(px, width, height, 0, band_y, width, row_h, br, bg, bb);
     if (n == 0) {
         const char *empty = "No sections";
         int x = 0;
@@ -717,11 +762,16 @@ static void render(struct App *app) {
             snprintf(face_label, sizeof face_label, "Font list");
         }
         labels[CHROME_FONT] = face_label;
+    } else if (app->face == 3 && app->custom_name[0] != '\0' && strcmp(app->custom_name, "Font file") != 0) {
+        snprintf(face_label, sizeof face_label, "Font %s", app->custom_name);
+        labels[CHROME_FONT] = face_label;
     }
     if (app->fetching) {
         labels[CHROME_GETFACES] = "Getting faces";
     } else if (app->got_face[0] && app->got_face[1] && app->got_face[2]) {
         labels[CHROME_GETFACES] = "Faces ready";
+    } else if (app->face_failed) {
+        labels[CHROME_GETFACES] = "Download failed";
     } else {
         labels[CHROME_GETFACES] = "Download faces";
     }
@@ -779,8 +829,12 @@ static void render(struct App *app) {
                 }
             }
             int cover = page_bar_cover();
+            int pr = 0;
+            int pg = 0;
+            int pb = 0;
+            page_ui_rgb(0, &pr, &pg, &pb);
             if (cover >= 255) {
-                fill_box(app->pixels, width, height, x0, y0, x1 - x0, y1 - y0, PAGE_PAPER_R, PAGE_PAPER_G, PAGE_PAPER_B);
+                fill_box(app->pixels, width, height, x0, y0, x1 - x0, y1 - y0, pr, pg, pb);
             } else {
                 for (int row = 0; row < y1 - y0; row++) {
                     int yy = y0 + row;
@@ -793,9 +847,9 @@ static void render(struct App *app) {
                             continue;
                         }
                         uint8_t *p = app->pixels + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
-                        p[0] = (uint8_t)((PAGE_PAPER_R * cover + (int)p[0] * (255 - cover)) / 255);
-                        p[1] = (uint8_t)((PAGE_PAPER_G * cover + (int)p[1] * (255 - cover)) / 255);
-                        p[2] = (uint8_t)((PAGE_PAPER_B * cover + (int)p[2] * (255 - cover)) / 255);
+                        p[0] = (uint8_t)((pr * cover + (int)p[0] * (255 - cover)) / 255);
+                        p[1] = (uint8_t)((pg * cover + (int)p[1] * (255 - cover)) / 255);
+                        p[2] = (uint8_t)((pb * cover + (int)p[2] * (255 - cover)) / 255);
                     }
                 }
             }
@@ -865,28 +919,40 @@ static void render(struct App *app) {
     }
     if (app->trail_h > 0 && trail_text[0] != '\0') {
         const char *shown = trail_text;
-        fill_box(app->pixels, width, height, app->trail_x, app->trail_y, app->trail_w, app->trail_h, PAGE_PAPER_R,
-                 PAGE_PAPER_G, PAGE_PAPER_B);
+        int pr = 0;
+        int pg = 0;
+        int pb = 0;
+        int rr = 0;
+        int rg = 0;
+        int rb = 0;
+        page_ui_rgb(0, &pr, &pg, &pb);
+        page_ui_rgb(1, &rr, &rg, &rb);
+        fill_box(app->pixels, width, height, app->trail_x, app->trail_y, app->trail_w, app->trail_h, pr, pg, pb);
         page_draw_labels(app->pixels, width, height, 1, &app->trail_x, &app->trail_y, &app->trail_w, &app->trail_h,
                          &shown, 0, label_px, inset_top, clip_bottom);
-        fill_box(app->pixels, width, height, app->trail_x, app->trail_y + app->trail_h - 1, app->trail_w, 1,
-                 PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B);
+        fill_box(app->pixels, width, height, app->trail_x, app->trail_y + app->trail_h - 1, app->trail_w, 1, rr, rg,
+                 rb);
     }
     page_draw_menu(app->pixels, width, height, app->chrome.x[CHROME_SETTINGS], app->chrome.y[CHROME_SETTINGS],
                    app->chrome.w[CHROME_SETTINGS]);
     app->sel_n = 0;
-    if (app->sel_menu && doc_caret(app->doc) != doc_anchor(app->doc)) {
+    if (app->sel_menu) {
+        int has_sel = doc_caret(app->doc) != doc_anchor(app->doc);
         int x0 = 0;
         int y0 = 0;
         int x1 = 0;
         int y1 = 0;
         int sh = 0;
-        if (page_sel_ends(&x0, &y0, &x1, &y1, &sh) == 0) {
+        int placed = has_sel && page_sel_ends(&x0, &y0, &x1, &y1, &sh) == 0;
+        if (!placed && !has_sel) {
+            placed = page_caret_box(&x0, &y0, &sh) == 0;
+        }
+        if (placed) {
             int row = label_px + label_px / 2;
             if (row < 48) {
                 row = 48;
             }
-            int mw = label_px * 5;
+            int mw = label_px * 6;
             if (mw < row * 2) {
                 mw = row * 2;
             }
@@ -900,25 +966,40 @@ static void render(struct App *app) {
             if (mx > width - mw - 8) {
                 mx = width - mw - 8;
             }
-            int my = y0 - 8 - row * 3;
-            int bar_top = app->chrome.h[CHROME_BOLD] > 0 ? app->chrome.y[CHROME_BOLD] : height;
-            if (my < inset_top) {
-                my = y0 + sh + 8;
+            int editing = !page_readonly();
+            int nitem = 0;
+            const char *items[3];
+            if (has_sel) {
+                items[nitem++] = "Copy";
             }
-            if (my + row * 3 > bar_top && y0 - 8 - row * 3 >= inset_top) {
-                my = y0 - 8 - row * 3;
+            if (editing && has_sel) {
+                items[nitem++] = "Cut";
             }
-            app->sel_x = mx;
-            app->sel_y = my;
-            app->sel_w = mw;
-            app->sel_h = row;
-            app->sel_n = 3;
-            int xs[3] = {mx, mx, mx};
-            int ys[3] = {my, my + row, my + row * 2};
-            int ws[3] = {mw, mw, mw};
-            int hs[3] = {row, row, row};
-            const char *items[3] = {"Edit", "Copy", "Cut"};
-            page_draw_labels(app->pixels, width, height, 3, xs, ys, ws, hs, items, 0, label_px, inset_top, bar_top);
+            if (editing) {
+                items[nitem++] = "Paste";
+            }
+            if (nitem > 0) {
+                int my = y0 - 8 - row * nitem;
+                int bar_top = app->chrome.h[CHROME_BOLD] > 0 ? app->chrome.y[CHROME_BOLD] : height;
+                if (my < inset_top) {
+                    my = y0 + sh + 8;
+                }
+                if (my + row * nitem > bar_top && y0 - 8 - row * nitem >= inset_top) {
+                    my = y0 - 8 - row * nitem;
+                }
+                app->sel_x = mx;
+                app->sel_y = my;
+                app->sel_w = mw;
+                app->sel_h = row;
+                app->sel_n = nitem;
+                page_draw_plate(app->pixels, width, height, mx, my, mw, row * nitem, nitem);
+                int xs[3] = {mx, mx, mx};
+                int ys[3] = {my, my + row, my + row * 2};
+                int ws[3] = {mw, mw, mw};
+                int hs[3] = {row, row, row};
+                page_draw_labels(app->pixels, width, height, nitem, xs, ys, ws, hs, items, 0, label_px, inset_top,
+                                 bar_top);
+            }
         }
     }
     glViewport(0, 0, width, height);
@@ -1243,6 +1324,36 @@ static void read_insets(struct App *app, int *top, int *bottom) {
     (*env)->DeleteLocalRef(env, keyboard);
 }
 
+static void open_link(struct App *app, const char *url) {
+    JNIEnv *env = NULL;
+    jclass pen = NULL;
+    jmethodID open = NULL;
+    jstring text = NULL;
+    if (app == NULL || url == NULL || url[0] == '\0') {
+        return;
+    }
+    env = jni_env(app);
+    if (env == NULL || app->android == NULL || app->android->activity == NULL) {
+        return;
+    }
+    pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        return;
+    }
+    open = (*env)->GetStaticMethodID(env, pen, "openLink", "(Landroid/app/Activity;Ljava/lang/String;)V");
+    if (jni_ok(env) && open != NULL) {
+        text = (*env)->NewStringUTF(env, url);
+    }
+    if (jni_ok(env) && open != NULL && text != NULL) {
+        (*env)->CallStaticVoidMethod(env, pen, open, app->android->activity->clazz, text);
+        jni_ok(env);
+    }
+    if (text != NULL) {
+        (*env)->DeleteLocalRef(env, text);
+    }
+    (*env)->DeleteLocalRef(env, pen);
+}
+
 static void fetch_faces(struct App *app) {
     JNIEnv *env = NULL;
     jclass pen = NULL;
@@ -1261,8 +1372,11 @@ static void fetch_faces(struct App *app) {
     fetch = (*env)->GetStaticMethodID(env, pen, "fetchFaces", "(Landroid/app/Activity;)V");
     if (jni_ok(env) && fetch != NULL) {
         app->fetching = 1;
+        app->face_failed = 0;
         (*env)->CallStaticVoidMethod(env, pen, fetch, app->android->activity->clazz);
-        jni_ok(env);
+        if (!jni_ok(env)) {
+            app->fetching = 0;
+        }
     }
     (*env)->DeleteLocalRef(env, pen);
 }
@@ -2070,7 +2184,7 @@ static int sel_row(const struct App *app, int x, int y) {
     return row;
 }
 
-/* A held press selects the word under the finger. A later drag grows that selection. */
+/* A held press selects the word under the finger. A gap leaves the caret for paste. */
 static void arm_select(struct App *app) {
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
@@ -2551,6 +2665,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             return 1;
         }
         if (action == AMOTION_EVENT_ACTION_UP) {
+            int table_hold = app->bar_hit == CHROME_TABLE && app->drag_mode == 0 && app->drag_at != 0 &&
+                             now_ms() - app->drag_at >= (int64_t)HOLD_MS * 2;
             int dragged = app->drag && app->drag_mode != 0;
             if (app->drag_mode == 6) {
                 int row_h = app->wheel_row_h > 0 ? app->wheel_row_h : 1;
@@ -2632,7 +2748,7 @@ static int on_input(struct android_app *android, AInputEvent *event) {
             if (dragged) {
                 app->tap_pending = 0;
                 app->tap_at = 0;
-                if (selecting && doc_caret(app->doc) != doc_anchor(app->doc)) {
+                if (selecting && (doc_caret(app->doc) != doc_anchor(app->doc) || !page_readonly())) {
                     app->sel_menu = 1;
                     claim_back(app);
                     render(app);
@@ -2655,20 +2771,28 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 }
             }
             if (chosen >= 0) {
+                int has_sel = doc_caret(app->doc) != doc_anchor(app->doc);
+                int editing = !page_readonly();
+                int row = 0;
+                int copy_row = has_sel ? row++ : -1;
+                int cut_row = editing && has_sel ? row++ : -1;
+                int paste_row = editing ? row++ : -1;
                 app->tap_pending = 0;
                 app->tap_at = 0;
-                if (chosen == 0) {
-                    page_set_readonly(0);
-                    app->sel_menu = 0;
-                    render(app);
-                    show_keyboard(app);
-                } else if (chosen == 1) {
+                if (chosen == copy_row) {
                     copy_selection(app);
                     app->sel_menu = 0;
                     render(app);
-                } else if (!page_readonly() && copy_selection(app) && doc_backspace(app->doc) == 0) {
+                } else if (chosen == cut_row && copy_selection(app) && doc_backspace(app->doc) == 0) {
                     app->sel_menu = 0;
                     save_doc(app);
+                    render(app);
+                } else if (chosen == paste_row) {
+                    app->sel_menu = 0;
+                    page_set_follow(0);
+                    if (paste_clip(app)) {
+                        save_doc(app);
+                    }
                     render(app);
                 }
                 return 1;
@@ -2690,8 +2814,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 if (n < 0) {
                     n = 0;
                 }
-                if (n > FONT_LIST_MAX + 2) {
-                    n = FONT_LIST_MAX + 2;
+                if (n > LISTS_ROWS) {
+                    n = LISTS_ROWS;
                 }
                 int row_h = app->lists_row_h > 0 ? app->lists_row_h : 1;
                 for (int i = 0; i < n; i++) {
@@ -2712,10 +2836,15 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                     app->lists_scroll = 0;
                     app->list_banner[0] = '\0';
                     app->list_busy = -1;
-                } else if (!app->cataloging && app->list_n > 0 && row - 1 < app->list_n && row - 1 < FONT_LIST_MAX) {
-                    app->list_busy = row - 1;
-                    app->list_banner[0] = '\0';
-                    fetch_catalog(app, app->list_name[row - 1]);
+                } else if (row > 0 && row - 1 < app->picked_n && row - 1 < PICKED_MAX) {
+                    apply_picked(app, app->picked_slot[row - 1]);
+                } else if (!app->cataloging && app->list_n > 0) {
+                    int remote = row - 1 - app->picked_n;
+                    if (remote >= 0 && remote < app->list_n && remote < FONT_LIST_MAX) {
+                        app->list_busy = remote;
+                        app->list_banner[0] = '\0';
+                        fetch_catalog(app, app->list_name[remote]);
+                    }
                 }
                 render(app);
                 return 1;
@@ -2914,6 +3043,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                     hide_keyboard(app);
                 }
             } else if (!page_readonly() && hit >= CHROME_BOLD && hit <= CHROME_BLOCK) {
+                /* A selection is already on screen. Follow pins the caret to the bottom and the page jumps. */
+                int marked = doc_caret(app->doc) != doc_anchor(app->doc);
                 if (hit == CHROME_BOLD || hit == CHROME_ITALIC || hit == CHROME_STRIKE || hit == CHROME_CODE ||
                     hit == CHROME_LINK) {
                     doc_select_word(app->doc);
@@ -2939,16 +3070,24 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                 } else if (hit == CHROME_RULE) {
                     doc_block(app->doc, 1);
                 } else if (hit == CHROME_TABLE) {
-                    doc_block(app->doc, 2);
+                    if (table_hold) {
+                        doc_table_column(app->doc, -1);
+                    } else if (doc_table_column(app->doc, 1) != 0) {
+                        doc_block(app->doc, 2);
+                    }
                 } else if (hit == CHROME_BLOCK) {
                     doc_block(app->doc, 3);
                 }
                 app->compose_n = 0;
                 app->bar_hit = -1;
-                page_set_follow(1);
+                if (marked) {
+                    page_set_follow(0);
+                } else {
+                    page_set_follow(1);
+                    show_keyboard(app);
+                }
                 save_doc(app);
                 render(app);
-                show_keyboard(app);
                 return 1;
             } else {
                 size_t len = 0;
@@ -2982,7 +3121,13 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                         app->sel_menu = 0;
                     }
                 } else {
+                    char url[480];
+                    char prev[480];
                     app->sel_menu = 0;
+                    if (page_link_url(text, len, at, url, sizeof url) == 0 &&
+                        page_link_url(text, len, doc_caret(app->doc), prev, sizeof prev) == 0 && strcmp(url, prev) == 0) {
+                        open_link(app, url);
+                    }
                     doc_place(app->doc, at);
                     app->tap_pending = 1;
                     app->tap_off = doc_caret(app->doc);
@@ -3280,6 +3425,7 @@ static int apply_custom_font(struct App *app) {
     app->custom = buf;
     app->custom_len = (int)n;
     app->face = 3;
+    read_custom_name(app);
     return 0;
 }
 
@@ -3396,6 +3542,303 @@ static unsigned char *load_path(const char *path, int *len) {
     return buf;
 }
 
+static int file_is_ttf(const char *path) {
+    FILE *f = NULL;
+    unsigned char magic[4];
+    size_t n = 0;
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    n = fread(magic, 1, 4, f);
+    fclose(f);
+    if (n != 4) {
+        return 0;
+    }
+    if (magic[0] == 0 && magic[1] == 1 && magic[2] == 0 && magic[3] == 0) {
+        return 1;
+    }
+    return memcmp(magic, "true", 4) == 0;
+}
+
+static int copy_file(const char *src, const char *dst) {
+    char tmp[640];
+    int len = 0;
+    int wrote = 0;
+    unsigned char *buf = NULL;
+    FILE *out = NULL;
+    size_t n = 0;
+    if (src == NULL || dst == NULL) {
+        return -1;
+    }
+    buf = load_path(src, &len);
+    if (buf == NULL) {
+        return -1;
+    }
+    wrote = snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+    if (wrote < 0 || (size_t)wrote >= sizeof tmp) {
+        free(buf);
+        return -1;
+    }
+    out = fopen(tmp, "wb");
+    if (out == NULL) {
+        free(buf);
+        return -1;
+    }
+    n = fwrite(buf, 1, (size_t)len, out);
+    free(buf);
+    if (n != (size_t)len || fclose(out) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    if (rename(tmp, dst) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static int write_text(const char *path, const char *text) {
+    FILE *f = NULL;
+    if (path == NULL || text == NULL) {
+        return -1;
+    }
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        return -1;
+    }
+    if (fprintf(f, "%s\n", text) < 0 || fclose(f) != 0) {
+        remove(path);
+        return -1;
+    }
+    return 0;
+}
+
+static int read_text_name(const char *path, char *out, size_t cap) {
+    FILE *f = NULL;
+    char raw[180];
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    if (fgets(raw, (int)sizeof raw, f) == NULL) {
+        raw[0] = '\0';
+    }
+    fclose(f);
+    return fontlist_face_name(raw, out, cap);
+}
+
+static int data_join(const struct App *app, const char *tail, char *out, size_t cap) {
+    const char *dir = NULL;
+    int wrote = 0;
+    if (app == NULL || out == NULL || cap == 0 || tail == NULL || app->android == NULL ||
+        app->android->activity == NULL) {
+        return -1;
+    }
+    dir = app->android->activity->internalDataPath;
+    if (dir == NULL) {
+        return -1;
+    }
+    wrote = snprintf(out, cap, "%s/%s", dir, tail);
+    if (wrote < 0 || (size_t)wrote >= cap) {
+        if (cap > 0) {
+            out[0] = '\0';
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int custom_name_path(const struct App *app, char *out, size_t cap) {
+    size_t n = 0;
+    if (app == NULL || out == NULL || cap == 0 || app->font_path[0] == '\0') {
+        return -1;
+    }
+    n = strlen(app->font_path);
+    if (n < 5 || n + 2 > cap || strcmp(app->font_path + n - 4, ".ttf") != 0) {
+        return -1;
+    }
+    memcpy(out, app->font_path, n - 4);
+    memcpy(out + (n - 4), ".name", 6);
+    return 0;
+}
+
+static void read_custom_name(struct App *app) {
+    char path[512];
+    char name[FONT_NAME_MAX];
+    app->custom_name[0] = '\0';
+    if (custom_name_path(app, path, sizeof path) != 0) {
+        return;
+    }
+    if (read_text_name(path, name, sizeof name)) {
+        memcpy(app->custom_name, name, strlen(name) + 1);
+    }
+}
+
+static int ensure_dir(const char *path) {
+    struct stat st;
+    if (path == NULL) {
+        return -1;
+    }
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? 0 : -1;
+    }
+    if (mkdir(path, 0700) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int picked_dest(const struct App *app, const char *name) {
+    int used[PICKED_MAX];
+    int i = 0;
+    memset(used, 0, sizeof used);
+    for (i = 0; i < app->picked_n && i < PICKED_MAX; i++) {
+        int slot = app->picked_slot[i];
+        if (slot < 0 || slot >= PICKED_MAX) {
+            continue;
+        }
+        used[slot] = 1;
+        if (name != NULL && strcmp(app->picked_name[i], name) == 0) {
+            return slot;
+        }
+    }
+    for (i = 0; i < PICKED_MAX; i++) {
+        if (!used[i]) {
+            return i;
+        }
+    }
+    return app->picked_n > 0 ? app->picked_slot[0] : 0;
+}
+
+static void load_picked(struct App *app) {
+    char dir[512];
+    int i = 0;
+    app->picked_n = 0;
+    if (data_join(app, "picked", dir, sizeof dir) != 0) {
+        return;
+    }
+    for (i = 0; i < PICKED_MAX; i++) {
+        char ttf[576];
+        char name_path[576];
+        char name[FONT_NAME_MAX];
+        int wrote = snprintf(ttf, sizeof ttf, "%s/%d.ttf", dir, i);
+        if (wrote < 0 || (size_t)wrote >= sizeof ttf) {
+            continue;
+        }
+        wrote = snprintf(name_path, sizeof name_path, "%s/%d.name", dir, i);
+        if (wrote < 0 || (size_t)wrote >= sizeof name_path) {
+            continue;
+        }
+        if (!file_is_ttf(ttf)) {
+            continue;
+        }
+        if (!read_text_name(name_path, name, sizeof name)) {
+            memcpy(name, "Font file", sizeof "Font file");
+        }
+        if (app->picked_n >= PICKED_MAX) {
+            break;
+        }
+        app->picked_slot[app->picked_n] = i;
+        memcpy(app->picked_name[app->picked_n], name, strlen(name) + 1);
+        app->picked_n++;
+    }
+}
+
+static void remember_picked(struct App *app) {
+    char raw_path[512];
+    char raw[180];
+    char name[FONT_NAME_MAX];
+    char dir[512];
+    char ttf[576];
+    char name_path[576];
+    int slot = 0;
+    int wrote = 0;
+    FILE *f = NULL;
+    if (app == NULL || !file_is_ttf(app->font_path)) {
+        return;
+    }
+    raw[0] = '\0';
+    if (custom_name_path(app, raw_path, sizeof raw_path) == 0) {
+        f = fopen(raw_path, "rb");
+        if (f != NULL) {
+            if (fgets(raw, (int)sizeof raw, f) == NULL) {
+                raw[0] = '\0';
+            }
+            fclose(f);
+        }
+    }
+    if (!fontlist_face_name(raw, name, sizeof name)) {
+        memcpy(name, "Font file", sizeof "Font file");
+    }
+    if (data_join(app, "picked", dir, sizeof dir) != 0 || ensure_dir(dir) != 0) {
+        return;
+    }
+    slot = picked_dest(app, name);
+    wrote = snprintf(ttf, sizeof ttf, "%s/%d.ttf", dir, slot);
+    if (wrote < 0 || (size_t)wrote >= sizeof ttf) {
+        return;
+    }
+    wrote = snprintf(name_path, sizeof name_path, "%s/%d.name", dir, slot);
+    if (wrote < 0 || (size_t)wrote >= sizeof name_path) {
+        return;
+    }
+    if (copy_file(app->font_path, ttf) != 0) {
+        return;
+    }
+    write_text(name_path, name);
+    load_picked(app);
+    memcpy(app->custom_name, name, strlen(name) + 1);
+}
+
+static int apply_picked(struct App *app, int slot) {
+    char dir[512];
+    char ttf[576];
+    char name_path[512];
+    char shown[FONT_NAME_MAX];
+    int i = 0;
+    int wrote = 0;
+    int found = 0;
+    if (app == NULL || slot < 0 || slot >= PICKED_MAX) {
+        return -1;
+    }
+    shown[0] = '\0';
+    for (i = 0; i < app->picked_n && i < PICKED_MAX; i++) {
+        if (app->picked_slot[i] == slot) {
+            memcpy(shown, app->picked_name[i], strlen(app->picked_name[i]) + 1);
+            found = 1;
+            break;
+        }
+    }
+    if (!found || app->font_path[0] == '\0' || data_join(app, "picked", dir, sizeof dir) != 0) {
+        return -1;
+    }
+    wrote = snprintf(ttf, sizeof ttf, "%s/%d.ttf", dir, slot);
+    if (wrote < 0 || (size_t)wrote >= sizeof ttf || copy_file(ttf, app->font_path) != 0) {
+        return -1;
+    }
+    if (custom_name_path(app, name_path, sizeof name_path) == 0) {
+        write_text(name_path, shown);
+    }
+    if (apply_custom_font(app) != 0) {
+        return -1;
+    }
+    app->lists = 0;
+    app->settings = 0;
+    app->options = 0;
+    app->list_banner[0] = '\0';
+    app->list_busy = -1;
+    save_prefs(app);
+    return 0;
+}
+
 static const char *k_face_file[] = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
                                    "LiberationMono-Regular.ttf"};
 
@@ -3487,6 +3930,71 @@ static int load_system_face(struct App *app) {
     return -1;
 }
 
+static int load_one_style(struct App *app, int which, const char *name) {
+    char path[512];
+    int wrote = 0;
+    int len = 0;
+    unsigned char *buf = NULL;
+    const char *dir = NULL;
+    if (app->android == NULL || app->android->activity == NULL || app->android->activity->internalDataPath == NULL) {
+        return -1;
+    }
+    dir = app->android->activity->internalDataPath;
+    wrote = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (wrote < 0 || (size_t)wrote >= sizeof path) {
+        return -1;
+    }
+    buf = load_path(path, &len);
+    if (buf == NULL || page_set_style(which, buf, len) != 0) {
+        free(buf);
+        page_set_style(which, NULL, 0);
+        return -1;
+    }
+    if (which == 1) {
+        free(app->bold_ttf);
+        app->bold_ttf = buf;
+        app->bold_len = len;
+    } else {
+        free(app->italic_ttf);
+        app->italic_ttf = buf;
+        app->italic_len = len;
+    }
+    return 0;
+}
+
+static void load_style_files(struct App *app, const char *regular) {
+    const char *tag = "-Regular.ttf";
+    size_t tag_n = 0;
+    size_t n = 0;
+    char bold_name[96];
+    char italic_name[96];
+    page_set_style(1, NULL, 0);
+    page_set_style(2, NULL, 0);
+    free(app->bold_ttf);
+    free(app->italic_ttf);
+    app->bold_ttf = NULL;
+    app->italic_ttf = NULL;
+    app->bold_len = 0;
+    app->italic_len = 0;
+    if (regular == NULL) {
+        return;
+    }
+    tag_n = strlen(tag);
+    n = strlen(regular);
+    if (n <= tag_n || strcmp(regular + n - tag_n, tag) != 0) {
+        return;
+    }
+    if (n - tag_n + 12 >= sizeof bold_name) {
+        return;
+    }
+    memcpy(bold_name, regular, n - tag_n);
+    memcpy(bold_name + (n - tag_n), "-Bold.ttf", 10);
+    memcpy(italic_name, regular, n - tag_n);
+    memcpy(italic_name + (n - tag_n), "-Italic.ttf", 12);
+    load_one_style(app, 1, bold_name);
+    load_one_style(app, 2, italic_name);
+}
+
 static void use_loaded_face(struct App *app) {
     if (app->face == 4 && apply_catalog_font(app) >= 0) {
         return;
@@ -3499,12 +4007,14 @@ static void use_loaded_face(struct App *app) {
     }
     if (app->got_face[app->face] && page_set_font(app->fonts[app->face], app->font_lens[app->face]) == 0) {
         app->system_font = 0;
+        load_style_files(app, k_face_file[app->face]);
         return;
     }
     for (int i = 0; i < 3; i++) {
         if (app->got_face[i] && page_set_font(app->fonts[i], app->font_lens[i]) == 0) {
             app->face = i;
             app->system_font = 0;
+            load_style_files(app, k_face_file[i]);
             return;
         }
     }
@@ -3627,6 +4137,10 @@ void android_main(struct android_app *android) {
     }
     refresh_session(&app);
     load_saved_faces(&app);
+    load_picked(&app);
+    if (app.picked_n == 0) {
+        remember_picked(&app);
+    }
     if (app.face < 0 || app.face > 4) {
         app.face = 0;
     }
@@ -3712,6 +4226,7 @@ void android_main(struct android_app *android) {
             if (g_font_pick) {
                 g_font_pick = 0;
                 if (apply_custom_font(&app) == 0) {
+                    remember_picked(&app);
                     save_prefs(&app);
                     render(&app);
                 } else {
@@ -3722,6 +4237,7 @@ void android_main(struct android_app *android) {
                 int ok = g_faces > 0;
                 g_faces = 0;
                 app.fetching = 0;
+                app.face_failed = ok ? 0 : 1;
                 if (ok) {
                     load_saved_faces(&app);
                     app.system_font = 0;
@@ -3794,4 +4310,6 @@ void android_main(struct android_app *android) {
     }
     free(app.custom);
     free(app.catalog);
+    free(app.bold_ttf);
+    free(app.italic_ttf);
 }

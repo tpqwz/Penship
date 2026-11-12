@@ -158,6 +158,20 @@ static void test_table_tab(void) {
     expect(doc_insert(doc, "\n", 1) == 0, "enter on the last row adds one");
     expect(strstr(doc_text(doc, NULL), "| c | d |\n| | |") != NULL, "the new row keeps both columns");
     doc_free(doc);
+    doc = doc_new();
+    expect(doc_insert(doc, text, strlen(text)) == 0, "insert a table for a column");
+    doc_place(doc, 2);
+    expect(doc_table_column(doc, 1) == 0, "the table mark adds a column");
+    expect(strstr(doc_text(doc, NULL), "| A | | B |") != NULL, "the new column follows A");
+    expect(strstr(doc_text(doc, NULL), "| --- | --- | --- |") != NULL, "the delimiter gains a column");
+    doc_free(doc);
+    doc = doc_new();
+    expect(doc_insert(doc, text, strlen(text)) == 0, "insert a table to drop a column");
+    doc_place(doc, 6);
+    expect(doc_table_column(doc, -1) == 0, "an extra column can be removed");
+    expect(strstr(doc_text(doc, NULL), "| A |\n") != NULL, "B is gone");
+    expect(doc_table_column(doc, -1) == -1, "the last column stays");
+    doc_free(doc);
 }
 
 static void test_newline_continues_marker(void) {

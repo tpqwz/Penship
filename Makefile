@@ -19,7 +19,7 @@ GLUE_CFLAGS := -std=c11 -O2 -fPIC -I$(GLUE) -Wno-unused-parameter
 LDFLAGS := -shared -pthread -Wl,-z,max-page-size=16384 -Wl,-u,ANativeActivity_onCreate \
 	-landroid -llog -lEGL -lGLESv2 -lm
 
-.PHONY: all test apk install clean
+.PHONY: all test apk release install clean
 .SECONDARY:
 
 all: test apk
@@ -107,14 +107,36 @@ build/compiled-res.zip: android/res/mipmap-mdpi/ic_launcher.png android/res/mipm
 	mkdir -p build
 	$(AAPT2) compile --dir android/res -o $@
 
+# make apk keeps android:debuggable for a phone you are working on.
+# make release is the package that gets published. Same debug key, so it still
+# replaces that install. The native libraries are stripped.
+release: RELEASE = 1
+release: apk
+
 apk: test $(foreach abi,$(ABIS),build/lib/$(abi)/libpenship.so) build/dex/classes.dex android/AndroidManifest.xml build/compiled-res.zip
 	@test -n "$(BUILD_TOOLS)" || (echo "build-tools not found under $(ANDROID_HOME)" && exit 1)
 	mkdir -p build
-	$(AAPT2) link -o build/linked.apk --manifest android/AndroidManifest.xml -I $(PLATFORM) \
+	manifest=android/AndroidManifest.xml; \
+	if [ "$(RELEASE)" = 1 ]; then \
+		sed '/android:debuggable=/d' android/AndroidManifest.xml > build/AndroidManifest.release.xml; \
+		manifest=build/AndroidManifest.release.xml; \
+	fi; \
+	$(AAPT2) link -o build/linked.apk --manifest $$manifest -I $(PLATFORM) \
 		-R build/compiled-res.zip \
-		--min-sdk-version $(MIN_SDK) --target-sdk-version 36
+		--min-sdk-version $(MIN_SDK) --target-sdk-version 36; \
+	pack_libs=""; \
+	for abi in $(ABIS); do \
+		src=build/lib/$$abi/libpenship.so; \
+		if [ "$(RELEASE)" = 1 ]; then \
+			mkdir -p build/stripped/$$abi; \
+			cp $$src build/stripped/$$abi/libpenship.so; \
+			$(TOOLCHAIN)/bin/llvm-strip --strip-unneeded build/stripped/$$abi/libpenship.so; \
+			src=build/stripped/$$abi/libpenship.so; \
+		fi; \
+		pack_libs="$$pack_libs lib/$$abi/libpenship.so=$$src"; \
+	done; \
 	python3 tools/pack_apk.py build/linked.apk build/unaligned.apk \
-		$(foreach abi,$(ABIS),lib/$(abi)/libpenship.so=build/lib/$(abi)/libpenship.so) \
+		$$pack_libs \
 		assets/OFL.txt=assets/OFL.txt \
 		assets/showcase.md=samples/showcase.md \
 		classes.dex=build/dex/classes.dex
@@ -126,6 +148,11 @@ apk: test $(foreach abi,$(ABIS),build/lib/$(abi)/libpenship.so) build/dex/classe
 	$(APKSIGNER) sign --ks build/debug.keystore --ks-pass pass:android --key-pass pass:android \
 		--out build/penship.apk build/aligned.apk
 	$(APKSIGNER) verify --verbose build/penship.apk
+	@if [ "$(RELEASE)" = 1 ]; then \
+		if $(AAPT2) dump xmltree build/penship.apk --file AndroidManifest.xml | grep -q debuggable; then \
+			echo "release manifest is still debuggable"; exit 1; \
+		fi; \
+	fi
 
 install: apk
 	$(ADB) install -r build/penship.apk

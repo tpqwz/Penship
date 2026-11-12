@@ -94,6 +94,7 @@ public class Pen extends android.app.NativeActivity {
         }
         if (request == REQ_FONT && result == RESULT_OK && data != null && data.getData() != null) {
             if (copyFont(data.getData())) {
+                writeFaceName(data.getData());
                 fontPicked();
             }
             return;
@@ -124,6 +125,55 @@ public class Pen extends android.app.NativeActivity {
         } else {
             opened = null;
             reload(0);
+        }
+    }
+
+    /** The picker name, one line, capped so a long display name cannot fill storage. */
+    private void writeFaceName(Uri uri) {
+        String raw = "";
+        android.database.Cursor cursor = null;
+        java.io.OutputStream out = null;
+        java.io.File dest = new java.io.File(getFilesDir(), "custom.name");
+        try {
+            cursor = getContentResolver().query(uri, new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
+                    null, null, null);
+            if (cursor != null && cursor.moveToFirst() && cursor.getColumnCount() > 0 && !cursor.isNull(0)) {
+                String got = cursor.getString(0);
+                if (got != null) {
+                    raw = got;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            raw = "";
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        raw = raw.replace('\n', ' ').replace('\r', ' ');
+        byte[] bytes = raw.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int n = bytes.length;
+        if (n > 160) {
+            n = 160;
+            while (n > 0 && (bytes[n - 1] & 0xc0) == 0x80) {
+                n--;
+            }
+        }
+        try {
+            out = new java.io.FileOutputStream(dest);
+            if (n > 0) {
+                out.write(bytes, 0, n);
+            }
+            out.write('\n');
+        } catch (java.io.IOException ignored) {
+            dest.delete();
+        } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (java.io.IOException ignored) {
+                }
+            }
         }
     }
 
@@ -206,8 +256,29 @@ public class Pen extends android.app.NativeActivity {
     private static final String FACE_PACK =
             "https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz";
     private static final String[] FACE_FILE = {"LiberationSans-Regular.ttf", "LiberationSerif-Regular.ttf",
-            "LiberationMono-Regular.ttf"};
+            "LiberationMono-Regular.ttf", "LiberationSans-Bold.ttf", "LiberationSans-Italic.ttf",
+            "LiberationSerif-Bold.ttf", "LiberationSerif-Italic.ttf", "LiberationMono-Bold.ttf",
+            "LiberationMono-Italic.ttf"};
     private static volatile boolean fetching;
+
+    /** Open an http(s) address from the note. A link that is not http(s) stays in the editor. */
+    public static void openLink(Activity activity, String url) {
+        if (activity == null || url == null) {
+            return;
+        }
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            return;
+        }
+        if (url.indexOf(' ') >= 0 || url.indexOf('\n') >= 0 || url.indexOf('\r') >= 0) {
+            return;
+        }
+        try {
+            android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url));
+            activity.startActivity(intent);
+        } catch (android.content.ActivityNotFoundException ignored) {
+        }
+    }
 
     /** Download the three regular Liberation faces into app storage. The note stays put. */
     public static void fetchFaces(Activity activity) {
@@ -222,61 +293,312 @@ public class Pen extends android.app.NativeActivity {
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        boolean ok = downloadFaces(host);
-                        fetching = false;
-                        final int code = ok ? 1 : 0;
-                        host.runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!host.isFinishing()) {
-                                    facesFetched(code);
-                                }
-                            }
-                        });
+                        boolean ok = false;
+                        try {
+                            ok = downloadFaces(host);
+                        } finally {
+                            fetching = false;
+                            facesFetched(ok ? 1 : 0);
+                        }
                     }
                 }, "penship-faces").start();
             }
         });
     }
 
-    private static boolean hostOk(String host) {
-        return "github.com".equals(host) || "www.github.com".equals(host) || "objects.githubusercontent.com".equals(host);
+    private static boolean hostAllowed(String host) {
+        return "github.com".equals(host) || "www.github.com".equals(host) || "raw.githubusercontent.com".equals(host)
+                || "objects.githubusercontent.com".equals(host) || "fonts.gstatic.com".equals(host);
+    }
+
+    private static boolean facesReady(java.io.File dir) {
+        int i = 0;
+        for (i = 0; i < FACE_FILE.length; i++) {
+            java.io.File face = new java.io.File(dir, FACE_FILE[i]);
+            if (!face.isFile() || face.length() < 1000 || face.length() > FONT_MAX) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean downloadFaces(Activity activity) {
+        java.io.File dir = activity.getFilesDir();
+        java.io.File pack = new java.io.File(dir, "faces.tgz.part");
+        java.io.InputStream in = null;
+        if (facesReady(dir)) {
+            pack.delete();
+            new java.io.File(pack.getPath() + ".url").delete();
+            return true;
+        }
+        if (!resumeToFile(activity, FACE_PACK, pack, 8 * 1024 * 1024)) {
+            return false;
+        }
+        if (!gzipMagic(pack)) {
+            pack.delete();
+            new java.io.File(pack.getPath() + ".url").delete();
+            return false;
+        }
+        try {
+            in = new java.io.FileInputStream(pack);
+            boolean ok = extractFaces(in, dir);
+            in.close();
+            in = null;
+            if (ok) {
+                pack.delete();
+                new java.io.File(pack.getPath() + ".url").delete();
+            }
+            return ok || facesReady(dir);
+        } catch (java.io.IOException ignored) {
+            return facesReady(dir);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (java.io.IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /** A VPN can answer the name and then refuse the socket. Use the address on the normal route. */
+    private static java.net.InetAddress resolve(android.content.Context context, String host) {
+        if (context == null || host == null) {
+            return null;
+        }
+        android.net.ConnectivityManager cm =
+                (android.net.ConnectivityManager) context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            return null;
+        }
+        android.net.Network[] nets = cm.getAllNetworks();
+        if (nets == null) {
+            return null;
+        }
+        java.net.InetAddress fallback = null;
+        for (int i = 0; i < nets.length; i++) {
+            try {
+                java.net.InetAddress[] addrs = nets[i].getAllByName(host);
+                if (addrs == null) {
+                    continue;
+                }
+                for (int a = 0; a < addrs.length; a++) {
+                    if (addrs[a] instanceof java.net.Inet4Address) {
+                        return addrs[a];
+                    }
+                    if (fallback == null) {
+                        fallback = addrs[a];
+                    }
+                }
+            } catch (java.io.IOException ignored) {
+            }
+        }
+        return fallback;
+    }
+
+    private static boolean ipLiteral(String host) {
+        if (host == null || host.length() == 0) {
+            return false;
+        }
+        if (host.indexOf(':') >= 0) {
+            return true;
+        }
+        for (int i = 0; i < host.length(); i++) {
+            char c = host.charAt(i);
+            if (c != '.' && (c < '0' || c > '9')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static javax.net.ssl.SSLSocketFactory sniFactory(final String name) {
+        final javax.net.ssl.SSLSocketFactory base = javax.net.ssl.HttpsURLConnection.getDefaultSSLSocketFactory();
+        return new javax.net.ssl.SSLSocketFactory() {
+            private java.net.Socket apply(java.net.Socket sock) {
+                if (sock instanceof javax.net.ssl.SSLSocket) {
+                    javax.net.ssl.SSLSocket ssl = (javax.net.ssl.SSLSocket) sock;
+                    javax.net.ssl.SSLParameters params = ssl.getSSLParameters();
+                    java.util.List<javax.net.ssl.SNIServerName> names = new java.util.ArrayList<javax.net.ssl.SNIServerName>();
+                    names.add(new javax.net.ssl.SNIHostName(name));
+                    params.setServerNames(names);
+                    ssl.setSSLParameters(params);
+                }
+                return sock;
+            }
+
+            public String[] getDefaultCipherSuites() {
+                return base.getDefaultCipherSuites();
+            }
+
+            public String[] getSupportedCipherSuites() {
+                return base.getSupportedCipherSuites();
+            }
+
+            public java.net.Socket createSocket(java.net.Socket s, String host, int port, boolean autoClose)
+                    throws java.io.IOException {
+                return apply(base.createSocket(s, name, port, autoClose));
+            }
+
+            public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
+                return apply(base.createSocket(host, port));
+            }
+
+            public java.net.Socket createSocket(String host, int port, java.net.InetAddress local, int localPort)
+                    throws java.io.IOException {
+                return apply(base.createSocket(host, port, local, localPort));
+            }
+
+            public java.net.Socket createSocket(java.net.InetAddress host, int port) throws java.io.IOException {
+                return apply(base.createSocket(host, port));
+            }
+
+            public java.net.Socket createSocket(java.net.InetAddress host, int port, java.net.InetAddress local,
+                    int localPort) throws java.io.IOException {
+                return apply(base.createSocket(host, port, local, localPort));
+            }
+        };
+    }
+
+    private static java.net.HttpURLConnection openAddress(java.net.URL url, java.net.InetAddress ip)
+            throws java.io.IOException {
+        int port = url.getPort() == -1 ? 443 : url.getPort();
+        String file = url.getFile();
+        if (file == null || file.length() == 0) {
+            file = "/";
+        }
+        java.net.URL ipUrl = new java.net.URL("https", ip.getHostAddress(), port, file);
+        javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) ipUrl.openConnection();
+        final String name = url.getHost();
+        conn.setSSLSocketFactory(sniFactory(name));
+        conn.setHostnameVerifier(new javax.net.ssl.HostnameVerifier() {
+            public boolean verify(String host, javax.net.ssl.SSLSession session) {
+                return javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(name, session);
+            }
+        });
+        return conn;
+    }
+
+    /** 1 when dest holds the whole body. 0 when a short read was kept for the next try. -1 when the part must be dropped. */
+    private static int pull(android.content.Context context, String urlString, java.io.File dest, long have, int max) {
         java.net.HttpURLConnection conn = null;
         java.io.InputStream in = null;
+        java.io.OutputStream out = null;
         try {
-            java.net.URL url = new java.net.URL(FACE_PACK);
+            java.net.URL url = new java.net.URL(urlString);
             for (int hop = 0; hop < 5; hop++) {
-                if (!hostOk(url.getHost())) {
-                    return false;
+                if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null || !hostAllowed(url.getHost())) {
+                    return -1;
                 }
-                conn = (java.net.HttpURLConnection) url.openConnection();
-                conn.setInstanceFollowRedirects(false);
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(30000);
+                int port = url.getPort();
+                if (port != -1 && port != 443) {
+                    return -1;
+                }
+                java.net.InetAddress ip = resolve(context, url.getHost());
+                java.io.IOException dialError = null;
+                conn = null;
+                for (int attempt = 0; attempt < 2 && conn == null; attempt++) {
+                    java.net.HttpURLConnection trial = null;
+                    try {
+                        trial = attempt == 0 && ip != null ? openAddress(url, ip)
+                                : (java.net.HttpURLConnection) url.openConnection();
+                        trial.setInstanceFollowRedirects(true);
+                        trial.setConnectTimeout(15000);
+                        trial.setReadTimeout(60000);
+                        trial.setRequestProperty("User-Agent", "penship/0.1");
+                        trial.setRequestProperty("Accept-Encoding", "identity");
+                        trial.setRequestProperty("Connection", "close");
+                        if (have > 0) {
+                            trial.setRequestProperty("Range", "bytes=" + have + "-");
+                        }
+                        trial.getResponseCode();
+                        conn = trial;
+                    } catch (java.io.IOException ex) {
+                        dialError = ex;
+                        if (trial != null) {
+                            trial.disconnect();
+                        }
+                    }
+                }
+                if (conn == null) {
+                    if (dialError != null) {
+                        throw dialError;
+                    }
+                    return 0;
+                }
                 int code = conn.getResponseCode();
+                java.net.URL landed = conn.getURL();
+                String landedHost = landed == null ? null : landed.getHost();
+                if (landedHost != null && !ipLiteral(landedHost) && !hostAllowed(landedHost)) {
+                    android.util.Log.i("penship", "face host " + landedHost);
+                    return -1;
+                }
                 if (code >= 300 && code < 400) {
-                    String loc = conn.getHeaderField("Location");
+                    String loc = redirectTarget(conn);
                     conn.disconnect();
                     conn = null;
                     if (loc == null) {
-                        return false;
+                        android.util.Log.i("penship", "face redirect " + code);
+                        return -1;
                     }
                     url = new java.net.URL(url, loc);
                     continue;
                 }
-                if (code != 200) {
-                    return false;
+                boolean append = false;
+                long total = -1;
+                if (code == 206 && have > 0) {
+                    append = true;
+                    total = rangeTotal(conn.getHeaderField("Content-Range"), have);
+                } else if (code == 200) {
+                    append = false;
+                    have = 0;
+                    String len = conn.getHeaderField("Content-Length");
+                    if (len != null) {
+                        try {
+                            total = Long.parseLong(len.trim());
+                        } catch (NumberFormatException ignored) {
+                            total = -1;
+                        }
+                    }
+                } else if (code == 416 && have > 0) {
+                    return 1;
+                } else {
+                    android.util.Log.i("penship", "face http " + code);
+                    return have > 0 ? -1 : 0;
+                }
+                if (total > max) {
+                    return -1;
                 }
                 in = conn.getInputStream();
-                return extractFaces(in, activity.getFilesDir());
+                out = new java.io.FileOutputStream(dest, append);
+                byte[] buf = new byte[8192];
+                long got = have;
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    if (got + (long) n > max) {
+                        return -1;
+                    }
+                    out.write(buf, 0, n);
+                    got += n;
+                }
+                out.close();
+                out = null;
+                if (total >= 0 && got < total) {
+                    return 0;
+                }
+                return got > 0 ? 1 : 0;
             }
-            return false;
-        } catch (java.io.IOException ignored) {
-            return false;
+            return 0;
+        } catch (java.io.IOException ex) {
+            android.util.Log.i("penship", "face io " + ex);
+            return 0;
         } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (java.io.IOException ignored) {
+                }
+            }
             if (in != null) {
                 try {
                     in.close();
@@ -286,6 +608,128 @@ public class Pen extends android.app.NativeActivity {
             if (conn != null) {
                 conn.disconnect();
             }
+        }
+    }
+
+    private static String redirectTarget(java.net.HttpURLConnection conn) {
+        String loc = conn.getHeaderField("Location");
+        if (loc != null && loc.length() > 0) {
+            return loc;
+        }
+        java.util.Map<String, java.util.List<String>> headers = conn.getHeaderFields();
+        if (headers == null) {
+            return null;
+        }
+        for (java.util.Map.Entry<String, java.util.List<String>> entry : headers.entrySet()) {
+            String key = entry.getKey();
+            if (key != null && key.equalsIgnoreCase("Location") && entry.getValue() != null
+                    && !entry.getValue().isEmpty()) {
+                return entry.getValue().get(0);
+            }
+        }
+        return null;
+    }
+
+    private static long rangeTotal(String header, long have) {
+        if (header == null) {
+            return -1;
+        }
+        int slash = header.lastIndexOf('/');
+        if (slash < 0 || slash + 1 >= header.length()) {
+            return -1;
+        }
+        String total = header.substring(slash + 1).trim();
+        if ("*".equals(total)) {
+            return -1;
+        }
+        try {
+            long value = Long.parseLong(total);
+            return value >= have ? value : -1;
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    private static boolean resumeToFile(android.content.Context context, String urlString, java.io.File dest, int max) {
+        java.io.File note = new java.io.File(dest.getPath() + ".url");
+        String saved = readText(note);
+        if (!urlString.equals(saved)) {
+            dest.delete();
+            if (!writeText(note, urlString)) {
+                return false;
+            }
+        }
+        int attempt = 0;
+        for (attempt = 0; attempt < 2; attempt++) {
+            long have = dest.isFile() ? dest.length() : 0;
+            if (have < 0 || have > max) {
+                dest.delete();
+                have = 0;
+            }
+            int result = pull(context, urlString, dest, have, max);
+            if (result == 1) {
+                return dest.isFile() && dest.length() > 0;
+            }
+            if (result == 0) {
+                return false;
+            }
+            dest.delete();
+        }
+        return false;
+    }
+
+    private static String readText(java.io.File file) {
+        if (file == null || !file.isFile() || file.length() > 1024) {
+            return "";
+        }
+        try {
+            java.io.FileInputStream in = new java.io.FileInputStream(file);
+            byte[] buf = new byte[(int) file.length()];
+            int got = readFull(in, buf, buf.length);
+            in.close();
+            if (got < 0) {
+                return "";
+            }
+            return new String(buf, 0, got, java.nio.charset.StandardCharsets.US_ASCII);
+        } catch (java.io.IOException ignored) {
+            return "";
+        }
+    }
+
+    private static boolean writeText(java.io.File file, String text) {
+        java.io.OutputStream out = null;
+        try {
+            out = new java.io.FileOutputStream(file);
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            out.close();
+            return true;
+        } catch (java.io.IOException ignored) {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (java.io.IOException closeIgnored) {
+                }
+            }
+            return false;
+        }
+    }
+
+    private static boolean gzipMagic(java.io.File file) {
+        java.io.InputStream in = null;
+        try {
+            in = new java.io.FileInputStream(file);
+            int a = in.read();
+            int b = in.read();
+            in.close();
+            return a == 0x1f && b == 0x8b;
+        } catch (java.io.IOException ignored) {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (java.io.IOException closeIgnored) {
+                }
+            }
+            return false;
         }
     }
 
@@ -390,13 +834,16 @@ public class Pen extends android.app.NativeActivity {
         return got[0] && got[1] && got[2];
     }
 
-    /* Stylesheets on these hosts. rect and grove publish the same kind of list. */
-    private static final String[] LIST_HOST = {"acimwb.grok.me", "tlnotes.grok.me", "hyperbase.grok.me", "rect.grok.me",
-            "grove.grok.me"};
+    /* Text faces. Google Fonts serves the TrueType. Monaspace is the frozen Regular from its own repo. */
+    private static final String[] CATALOG = {"Atkinson Hyperlegible", "EB Garamond", "Fraunces", "IBM Plex Mono",
+            "IBM Plex Sans", "IBM Plex Serif", "Inconsolata", "JetBrains Mono", "Literata", "Libre Baskerville",
+            "Libre Franklin", "Lora", "Merriweather", "Monaspace Argon", "Monaspace Krypton", "Monaspace Neon",
+            "Monaspace Radon", "Monaspace Xenon", "Newsreader", "Noto Sans", "Noto Serif", "Nunito Sans", "Roboto",
+            "Source Code Pro", "Source Sans 3", "Source Serif 4", "Spectral"};
     private static volatile boolean listing;
     private static volatile boolean facing;
 
-    /** Fetch each host's face list into files/fontlists.css. Names only; a tap downloads one TrueType. */
+    /** Write the face catalog into files/fontlists.css. A tap downloads one TrueType. */
     public static void fetchLists(Activity activity) {
         if (listing) {
             return;
@@ -409,24 +856,21 @@ public class Pen extends android.app.NativeActivity {
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        boolean ok = downloadLists(host);
-                        listing = false;
-                        final int code = ok ? 1 : 0;
-                        host.runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!host.isFinishing()) {
-                                    listsFetched(code);
-                                }
-                            }
-                        });
+                        boolean ok = false;
+                        try {
+                            ok = downloadLists(host);
+                        } finally {
+                            listing = false;
+                            listsFetched(ok ? 1 : 0);
+                        }
                     }
                 }, "penship-lists").start();
             }
         });
     }
 
-    /** Download one TrueType for a family named by a list. The sites ship WOFF2, which the painter cannot read. */
+    /** Download one TrueType for a family named by a list. Monaspace comes from its own repo.
+     * The other sites ship WOFF2, so those families are fetched as TrueType from Google Fonts. */
     public static void fetchFace(Activity activity, String name) {
         if (facing) {
             return;
@@ -451,17 +895,13 @@ public class Pen extends android.app.NativeActivity {
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        boolean ok = downloadFace(host, family);
-                        facing = false;
-                        final int code = ok ? 1 : 0;
-                        host.runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!host.isFinishing()) {
-                                    catalogFetched(code);
-                                }
-                            }
-                        });
+                        boolean ok = false;
+                        try {
+                            ok = downloadFace(host, family);
+                        } finally {
+                            facing = false;
+                            catalogFetched(ok ? 1 : 0);
+                        }
                     }
                 }, "penship-face").start();
             }
@@ -567,84 +1007,17 @@ public class Pen extends android.app.NativeActivity {
         return out.toByteArray();
     }
 
-    private static void appendFamilies(StringBuilder out, String href) {
-        int p = 0;
-        while (p >= 0 && p < href.length()) {
-            int at = href.indexOf("family=", p);
-            int end = 0;
-            String raw;
-            String name;
-            if (at < 0) {
-                break;
-            }
-            at += 7;
-            end = at;
-            while (end < href.length()) {
-                char c = href.charAt(end);
-                if (c == '&' || c == ':' || c == '#') {
-                    break;
-                }
-                end++;
-            }
-            raw = href.substring(at, end).replace('+', ' ');
-            name = raw.trim();
-            if (familyOk(name)) {
-                out.append("@font-face{font-family:\"").append(name).append("\";}\n");
-            }
-            p = end + 1;
-        }
-    }
-
     private static boolean downloadLists(Activity activity) {
         StringBuilder css = new StringBuilder();
         File dir = activity.getFilesDir();
         File part = new File(dir, "fontlists.css.part");
         File dest = new File(dir, "fontlists.css");
-        int h = 0;
-        for (h = 0; h < LIST_HOST.length && css.length() < 700000; h++) {
-            String host = LIST_HOST[h];
-            byte[] html = httpsGet("https://" + host + "/", host, 200000);
-            String text;
-            int from = 0;
-            int sheets = 0;
-            if (html == null || html.length == 0) {
+        int i = 0;
+        for (i = 0; i < CATALOG.length; i++) {
+            if (!familyOk(CATALOG[i])) {
                 continue;
             }
-            text = new String(html, java.nio.charset.StandardCharsets.UTF_8);
-            css.append("/* penship-host: ").append(host, 0, host.indexOf('.')).append(" */\n");
-            while (sheets < 4 && css.length() < 700000 && (from = text.indexOf("href=\"", from)) >= 0) {
-                int start = from + 6;
-                int end = text.indexOf('"', start);
-                String href;
-                String abs = null;
-                if (end < 0) {
-                    break;
-                }
-                href = text.substring(start, end).replace("&amp;", "&");
-                from = end + 1;
-                if (href.contains("fonts.googleapis.com/css")) {
-                    appendFamilies(css, href);
-                    continue;
-                }
-                if (!href.contains(".css")) {
-                    continue;
-                }
-                if (href.startsWith("https://" + host + "/")) {
-                    abs = href;
-                } else if (href.startsWith("/") && !href.startsWith("//")) {
-                    abs = "https://" + host + href;
-                }
-                if (abs == null || abs.indexOf(' ') >= 0) {
-                    continue;
-                }
-                byte[] body = httpsGet(abs, host, 200000);
-                sheets++;
-                if (body == null || body.length == 0) {
-                    continue;
-                }
-                css.append(new String(body, java.nio.charset.StandardCharsets.UTF_8));
-                css.append('\n');
-            }
+            css.append("@font-face{font-family:\"").append(CATALOG[i]).append("\";}\n");
         }
         if (css.length() == 0) {
             return false;
@@ -747,6 +1120,26 @@ public class Pen extends android.app.NativeActivity {
         return fallback;
     }
 
+    /** Frozen Regular TrueType from githubnext/monaspace v1.400. Null when the name is not one of the five families. */
+    private static String monaspaceUrl(String family) {
+        String rest;
+        if (family == null || !family.startsWith("Monaspace ")) {
+            return null;
+        }
+        rest = family.substring(10).trim();
+        if (rest.endsWith(" Variable")) {
+            rest = rest.substring(0, rest.length() - 9).trim();
+        } else if (rest.endsWith(" Var")) {
+            rest = rest.substring(0, rest.length() - 4).trim();
+        }
+        if (!rest.equals("Argon") && !rest.equals("Krypton") && !rest.equals("Neon") && !rest.equals("Radon")
+                && !rest.equals("Xenon")) {
+            return null;
+        }
+        return "https://github.com/githubnext/monaspace/raw/v1.400/fonts/Frozen%20Fonts/Monaspace%20" + rest
+                + "/Monaspace" + rest + "Frozen-Regular.ttf";
+    }
+
     private static String trueTypeFor(String family) {
         byte[] css = httpsGet(cssUrl(family), "fonts.googleapis.com", 100000);
         String url = css == null ? null : ttfFromCss(new String(css, java.nio.charset.StandardCharsets.UTF_8));
@@ -766,39 +1159,66 @@ public class Pen extends android.app.NativeActivity {
         return css == null ? null : ttfFromCss(new String(css, java.nio.charset.StandardCharsets.UTF_8));
     }
 
+    private static boolean ttfMagic(java.io.File file) {
+        java.io.InputStream in = null;
+        try {
+            byte[] magic = new byte[4];
+            if (file == null || !file.isFile() || file.length() < 12 || file.length() > FONT_MAX) {
+                return false;
+            }
+            in = new java.io.FileInputStream(file);
+            if (readFull(in, magic, 4) != 4) {
+                in.close();
+                return false;
+            }
+            in.close();
+            return (magic[0] == 0 && magic[1] == 1 && magic[2] == 0 && magic[3] == 0)
+                    || (magic[0] == 't' && magic[1] == 'r' && magic[2] == 'u' && magic[3] == 'e')
+                    || (magic[0] == 'O' && magic[1] == 'T' && magic[2] == 'T' && magic[3] == 'O');
+        } catch (java.io.IOException ignored) {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (java.io.IOException closeIgnored) {
+                }
+            }
+            return false;
+        }
+    }
+
     private static boolean downloadFace(Activity activity, String family) {
-        String url = trueTypeFor(family);
-        byte[] body;
-        File dir = activity.getFilesDir();
-        File part = new File(dir, "catalog.ttf.part");
-        File namePart = new File(dir, "catalog.name.part");
+        String direct = monaspaceUrl(family);
+        String url = direct != null ? direct : trueTypeFor(family);
+        java.io.File dir = activity.getFilesDir();
+        java.io.File part = new java.io.File(dir, "catalog.ttf.part");
+        java.io.File namePart = new java.io.File(dir, "catalog.name.part");
+        java.io.OutputStream name = null;
         if (url == null) {
             return false;
         }
-        body = httpsGet(url, "fonts.gstatic.com", FONT_MAX);
-        if (body == null || body.length < 12) {
-            return false;
-        }
-        boolean ttf = (body[0] == 0 && body[1] == 1 && body[2] == 0 && body[3] == 0)
-                || (body[0] == 't' && body[1] == 'r' && body[2] == 'u' && body[3] == 'e')
-                || (body[0] == 'O' && body[1] == 'T' && body[2] == 'T' && body[3] == 'O');
-        if (!ttf) {
+        if (!resumeToFile(activity, url, part, FONT_MAX) || !ttfMagic(part)) {
+            if (part.isFile() && part.length() > 12 && !ttfMagic(part)) {
+                part.delete();
+                new java.io.File(part.getPath() + ".url").delete();
+            }
             return false;
         }
         try {
-            OutputStream raw = new FileOutputStream(part);
-            raw.write(body);
-            raw.close();
-            OutputStream name = new FileOutputStream(namePart);
+            name = new java.io.FileOutputStream(namePart);
             name.write(family.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             name.write('\n');
             name.close();
-        } catch (IOException ignored) {
-            part.delete();
+            return true;
+        } catch (java.io.IOException ignored) {
+            if (name != null) {
+                try {
+                    name.close();
+                } catch (java.io.IOException closeIgnored) {
+                }
+            }
             namePart.delete();
             return false;
         }
-        return true;
     }
 
     static final String IME_TAG = "penship-ime";

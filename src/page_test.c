@@ -65,6 +65,11 @@ static void test_caret_and_glyph(const unsigned char *font, int font_len) {
     }
     expect(caret_ink > 8, "empty page shows a caret");
     expect(caret_inside, "caret sits in the left margin column");
+    int box_x = 0;
+    int box_y = 0;
+    int box_h = 0;
+    expect(page_caret_box(&box_x, &box_y, &box_h) == 0, "the caret has a box");
+    expect(box_h > 8 && box_x >= margin && box_x < margin + 4, "the caret box sits on the bar");
 
     page_draw(px, width, height, 0, 0, width, height, "H", 1, 1, 1, font_px);
     int letter = 0;
@@ -153,6 +158,15 @@ static void test_table_cell(const unsigned char *font, int font_len) {
     expect(right >= 9 && right <= 13, "a tap on the right cell lands in Qty");
 }
 
+static void test_link_url(void) {
+    const char *text = "See [the note](https://penship.app) now\n";
+    char url[64];
+    expect(page_link_url(text, strlen(text), 6, url, sizeof url) == 0, "a link has an address");
+    expect(strcmp(url, "https://penship.app") == 0, "the address is the https target");
+    expect(page_link_url(text, strlen(text), 0, url, sizeof url) == -1, "the words before the link are not a link");
+    expect(page_link_url("Go [x](file://etc) ", 18, 4, url, sizeof url) == -1, "a file address stays in the note");
+}
+
 static void test_word_wrap(const unsigned char *font, int font_len) {
     expect(page_set_font(font, font_len) == 0, "wrap font");
     const int width = 140;
@@ -195,6 +209,39 @@ static void test_word_wrap(const unsigned char *font, int font_len) {
     size_t at = page_hit(0, 0, width, height, text, strlen(text), strlen(text), font_px, margin + 4, y);
     expect(at == 6, "the second line starts at world");
     free(px);
+    const int tight = 100;
+    uint8_t *tight_px = calloc((size_t)tight * (size_t)height, 4);
+    expect(tight_px != NULL, "tight wrap buffer");
+    if (tight_px == NULL) {
+        return;
+    }
+    page_draw(tight_px, tight, height, 0, 0, tight, height, text, strlen(text), strlen(text), strlen(text), font_px);
+    y = -1;
+    runs = 0;
+    in_run = 0;
+    for (int row = 0; row < height; row++) {
+        int row_ink = 0;
+        for (int col = 0; col < tight; col++) {
+            if (ink_at(tight_px, tight, col, row)) {
+                row_ink = 1;
+                break;
+            }
+        }
+        if (row_ink && !in_run) {
+            runs++;
+            if (runs == 2) {
+                y = row + 4;
+            }
+            in_run = 1;
+        }
+        if (!row_ink) {
+            in_run = 0;
+        }
+    }
+    expect(runs >= 2 && y > margin, "a word wider than the line still leaves the next word below");
+    at = page_hit(0, 0, tight, height, text, strlen(text), strlen(text), font_px, margin + 4, y);
+    expect(at >= 5, "the next line is not inside Hello");
+    free(tight_px);
 }
 
 /* The stars are hidden on a rendered line, so a tap has to land on the letter. */
@@ -645,6 +692,75 @@ static void test_rendered(const unsigned char *font, int font_len) {
     const char *struck = "~~H~~\nZ";
     page_draw(px, width, height, 0, 0, width, height, struck, strlen(struck), strlen(struck), strlen(struck), font_px);
     expect(count_exact(px, width, height, PAGE_STRIKE_R, PAGE_STRIKE_G, PAGE_STRIKE_B) > 4, "a strike draws a line");
+    {
+        const char *plain = "x\n";
+        const char *ex = "~~x~~\n";
+        int ink_top = -1;
+        int ink_bot = -1;
+        int bar_y = -1;
+        int bar_n = 0;
+        int skip = page_margin(font_px) + 8;
+        page_set_editing(0);
+        page_draw(px, width, height, 0, 0, width, height, plain, strlen(plain), 0, 0, font_px);
+        for (int y = 0; y < height; y++) {
+            for (int col = skip; col < width; col++) {
+                const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)col) * 4;
+                if (p[0] < 80 && p[1] < 80 && p[2] < 80) {
+                    if (ink_top < 0) {
+                        ink_top = y;
+                    }
+                    ink_bot = y;
+                }
+            }
+        }
+        page_draw(px, width, height, 0, 0, width, height, ex, strlen(ex), 0, 0, font_px);
+        for (int y = 0; y < height; y++) {
+            int n = 0;
+            for (int col = skip; col < width; col++) {
+                const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)col) * 4;
+                if (p[0] > PAGE_STRIKE_R - 18 && p[0] < PAGE_STRIKE_R + 18 && p[1] > PAGE_STRIKE_G - 18 &&
+                    p[1] < PAGE_STRIKE_G + 18 && p[2] > PAGE_STRIKE_B - 18 && p[2] < PAGE_STRIKE_B + 18) {
+                    n++;
+                }
+            }
+            if (n > bar_n) {
+                bar_n = n;
+                bar_y = y;
+            }
+        }
+        expect(ink_top >= 0 && ink_bot > ink_top && bar_y >= 0, "a struck letter and its line are both drawn");
+        if (ink_top >= 0 && bar_y >= 0) {
+            int ink_mid = (ink_top + ink_bot) / 2;
+            int delta = bar_y - ink_mid;
+            if (delta < 0) {
+                delta = -delta;
+            }
+            expect(delta <= 3, "the strike sits on the middle of the letter");
+        }
+    }
+    {
+        const char *wide_strike = "~~HHHHHHHHHHHHHHHHHHHHHHHHHHHH~~\n";
+        const int narrow = 160;
+        int edge = narrow - page_margin(font_px);
+        uint8_t *clip_px = calloc((size_t)narrow * 160, 4);
+        expect(clip_px != NULL, "strike clip buffer");
+        if (clip_px != NULL) {
+            int past = 0;
+            page_set_editing(0);
+            page_draw(clip_px, narrow, 160, 0, 0, narrow, 160, wide_strike, strlen(wide_strike),
+                      strlen(wide_strike), strlen(wide_strike), font_px);
+            for (int y = 0; y < 160; y++) {
+                for (int col = edge; col < narrow; col++) {
+                    const uint8_t *p = clip_px + ((size_t)y * (size_t)narrow + (size_t)col) * 4;
+                    if (p[0] == PAGE_STRIKE_R && p[1] == PAGE_STRIKE_G && p[2] == PAGE_STRIKE_B) {
+                        past++;
+                    }
+                }
+            }
+            expect(past == 0, "a struck word stops at the column");
+            free(clip_px);
+        }
+    }
 
     const char *image = "![A](u)\nZ";
     page_set_editing(1);
@@ -1168,7 +1284,39 @@ static void test_heads(void) {
     page_set_sections(1);
 }
 
+static void test_plate(void) {
+    const int width = 40;
+    const int height = 30;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    expect(px != NULL, "plate buffer");
+    if (px == NULL) {
+        return;
+    }
+    for (int i = 0; i < width * height; i++) {
+        px[i * 4] = 1;
+        px[i * 4 + 1] = 2;
+        px[i * 4 + 2] = 3;
+    }
+    page_set_theme(0);
+    page_draw_plate(px, width, height, 4, 4, 20, 16, 2);
+    const uint8_t *mid = px + ((size_t)8 * (size_t)width + 10) * 4;
+    const uint8_t *edge = px + ((size_t)4 * (size_t)width + 10) * 4;
+    const uint8_t *rule = px + ((size_t)12 * (size_t)width + 10) * 4;
+    const uint8_t *out = px + ((size_t)2 * (size_t)width + 2) * 4;
+    expect(mid[0] == PAGE_PAPER_R && mid[1] == PAGE_PAPER_G && mid[2] == PAGE_PAPER_B, "the plate covers the page");
+    expect(edge[0] == PAGE_RULE_R && edge[1] == PAGE_RULE_G && edge[2] == PAGE_RULE_B, "the plate has a solid edge");
+    expect(rule[0] == PAGE_RULE_R && rule[1] == PAGE_RULE_G && rule[2] == PAGE_RULE_B, "the rows are split by a rule");
+    expect(out[0] == 1 && out[1] == 2 && out[2] == 3, "the plate leaves the rest of the page");
+    page_set_theme(1);
+    page_draw_plate(px, width, height, 4, 4, 20, 16, 2);
+    expect(mid[0] == PAGE_NIGHT_PAPER_R && mid[1] == PAGE_NIGHT_PAPER_G && mid[2] == PAGE_NIGHT_PAPER_B,
+           "night paper is solid too");
+    page_set_theme(0);
+    free(px);
+}
+
 int main(void) {
+    test_plate();
     test_heads();
     test_find();
     test_glide();
@@ -1177,6 +1325,7 @@ int main(void) {
     if (font != NULL) {
         test_caret_and_glyph(font, font_len);
         test_hit(font, font_len);
+        test_link_url();
         test_word_wrap(font, font_len);
         test_table_cell(font, font_len);
         test_hit_rendered_mark(font, font_len);

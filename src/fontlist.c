@@ -43,6 +43,64 @@ int fontlist_name_ok(const char *name) {
     return 1;
 }
 
+int fontlist_face_name(const char *raw, char *out, size_t cap) {
+    const char *base = raw;
+    size_t n = 0;
+    size_t i = 0;
+    size_t o = 0;
+    int gap = 0;
+    if (out != NULL && cap > 0) {
+        out[0] = '\0';
+    }
+    if (raw == NULL || out == NULL || cap < 2) {
+        return 0;
+    }
+    for (i = 0; raw[i] != '\0' && i < 400; i++) {
+        if (raw[i] == '/' || raw[i] == '\\') {
+            base = raw + i + 1;
+        }
+    }
+    n = 0;
+    while (base[n] != '\0' && n < 400) {
+        n++;
+    }
+    if (n >= 4 && base[n - 4] == '.') {
+        char a = base[n - 3];
+        char b = base[n - 2];
+        char c = base[n - 1];
+        int ttf = (a == 't' || a == 'T') && (b == 't' || b == 'T') && (c == 'f' || c == 'F');
+        int otf = (a == 'o' || a == 'O') && (b == 't' || b == 'T') && (c == 'f' || c == 'F');
+        int ttc = (a == 't' || a == 'T') && (b == 't' || b == 'T') && (c == 'c' || c == 'C');
+        if (ttf || otf || ttc) {
+            n -= 4;
+        }
+    }
+    for (i = 0; i < n && o + 1 < cap && o + 1 < FONT_NAME_MAX; i++) {
+        unsigned char ch = (unsigned char)base[i];
+        if (name_char(ch) && ch != ' ') {
+            if (gap && o > 0) {
+                if (o + 2 >= cap || o + 2 >= FONT_NAME_MAX) {
+                    break;
+                }
+                out[o++] = ' ';
+            }
+            gap = 0;
+            out[o++] = (char)ch;
+        } else if (o > 0) {
+            gap = 1;
+        }
+    }
+    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '-')) {
+        o--;
+    }
+    out[o] = '\0';
+    if (!fontlist_name_ok(out)) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
 static size_t skip_ws(const char *s, size_t n, size_t i) {
     while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) {
         i++;
@@ -90,30 +148,23 @@ static size_t take_comment(const char *s, size_t n, size_t i, char *host, int re
     return end;
 }
 
-static int push_name(char names[][FONT_NAME_MAX], int count, int cap, const char *host, const char *family) {
-    char shown[FONT_NAME_MAX];
-    int wrote = 0;
+static int push_name(char names[][FONT_NAME_MAX], int count, int cap, const char *family) {
     int i = 0;
+    size_t n = 0;
     if (count >= cap || !fontlist_name_ok(family)) {
         return count;
     }
-    if (host != NULL && host[0] != '\0') {
-        wrote = snprintf(shown, sizeof shown, "%s | %s", host, family);
-        if (wrote < 0 || (size_t)wrote >= sizeof shown) {
-            wrote = snprintf(shown, sizeof shown, "%s", family);
-        }
-    } else {
-        wrote = snprintf(shown, sizeof shown, "%s", family);
-    }
-    if (wrote < 0 || (size_t)wrote >= sizeof shown) {
-        return count;
-    }
+    /* The same family is published by several of these sites. One row is enough. */
     for (i = 0; i < count; i++) {
-        if (strcmp(names[i], shown) == 0) {
+        if (strcmp(names[i], family) == 0) {
             return count;
         }
     }
-    memcpy(names[count], shown, (size_t)wrote + 1);
+    n = strlen(family);
+    if (n + 1 > FONT_NAME_MAX) {
+        return count;
+    }
+    memcpy(names[count], family, n + 1);
     return count + 1;
 }
 
@@ -154,8 +205,7 @@ static int take_family(const char *s, size_t start, size_t end, char *out) {
     return o > 0;
 }
 
-static int families_in(const char *s, size_t start, size_t end, char names[][FONT_NAME_MAX], int count, int cap,
-                       const char *host) {
+static int families_in(const char *s, size_t start, size_t end, char names[][FONT_NAME_MAX], int count, int cap) {
     size_t i = start;
     const char *key = "font-family";
     while (i + 11 < end && count < cap) {
@@ -172,7 +222,7 @@ static int families_in(const char *s, size_t start, size_t end, char names[][FON
         if (next < end && s[next] == ':') {
             char family[FONT_NAME_MAX];
             if (take_family(s, next + 1, end, family)) {
-                count = push_name(names, count, cap, host, family);
+                count = push_name(names, count, cap, family);
             }
             i = next + 1;
             continue;
@@ -183,7 +233,6 @@ static int families_in(const char *s, size_t start, size_t end, char names[][FON
 }
 
 int fontlist_collect(const char *css, size_t len, char names[][FONT_NAME_MAX], int cap) {
-    char host[24];
     size_t i = 0;
     int count = 0;
     const char *rule = "@font-face";
@@ -193,13 +242,12 @@ int fontlist_collect(const char *css, size_t len, char names[][FONT_NAME_MAX], i
     if (cap == 0 || len == 0) {
         return 0;
     }
-    host[0] = '\0';
     while (i < len && count < cap) {
         size_t j = 0;
         int depth = 0;
         size_t start = 0;
         if (css[i] == '/' && i + 1 < len && css[i + 1] == '*') {
-            i = take_comment(css, len, i, host, 1);
+            i = take_comment(css, len, i, NULL, 0);
             continue;
         }
         if (i + 10 <= len && memcmp(css + i, rule, 10) == 0) {
@@ -229,7 +277,7 @@ int fontlist_collect(const char *css, size_t len, char names[][FONT_NAME_MAX], i
                     j++;
                 }
             }
-            count = families_in(css, start, j < len ? j : len, names, count, cap, host);
+            count = families_in(css, start, j < len ? j : len, names, count, cap);
             i = j < len ? j + 1 : len;
             continue;
         }

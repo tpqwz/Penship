@@ -17,6 +17,8 @@
 
 static stbtt_fontinfo g_font;
 static int g_font_ok;
+static stbtt_fontinfo g_style[2];
+static int g_style_ok[2];
 static int g_typewriter;
 static int g_focus;
 static int g_line_hl;
@@ -56,6 +58,8 @@ static int g_sel_y1;
 static int g_sel_h;
 static int g_pad;
 static int g_line_h = 1;
+/* Pixels from the top of the line box to the middle of a lowercase letter. */
+static int g_strike_center = 1;
 static int g_drag_px;
 static int g_words;
 static int g_lines;
@@ -139,6 +143,19 @@ static void apply_dim(int *r, int *g, int *b) {
 
 void page_set_theme(int theme) {
     g_theme = theme == 1 ? 1 : 0;
+}
+
+void page_ui_rgb(int which, int *r, int *g, int *b) {
+    int slot = SLOT_RULE;
+    if (r == NULL || g == NULL || b == NULL) {
+        return;
+    }
+    if (which == 0) {
+        slot = SLOT_PAPER;
+    } else if (which == 2) {
+        slot = SLOT_BLOCK;
+    }
+    slot_rgb(slot, r, g, b);
 }
 
 void page_set_typewriter(int on) {
@@ -380,6 +397,7 @@ enum { GLYPH_CACHE = 128 };
 
 struct GlyphBit {
     unsigned cp;
+    unsigned face;
     int scale_milli;
     int gw;
     int gh;
@@ -393,6 +411,7 @@ static void glyph_cache_clear(void) {
         free(g_glyph[i].alpha);
         g_glyph[i].alpha = NULL;
         g_glyph[i].cp = 0;
+        g_glyph[i].face = 0;
         g_glyph[i].scale_milli = 0;
         g_glyph[i].gw = 0;
         g_glyph[i].gh = 0;
@@ -400,13 +419,16 @@ static void glyph_cache_clear(void) {
 }
 
 /* The same letters are rasterized on every glide frame. Keep the small ones. */
-static const unsigned char *glyph_bits(unsigned cp, float scale, int *x0, int *y0, int *gw, int *gh,
-                                       unsigned char *scratch, int scratch_n) {
+static const unsigned char *glyph_bits(int face, stbtt_fontinfo *font, unsigned cp, float scale, int *x0, int *y0,
+                                       int *gw, int *gh, unsigned char *scratch, int scratch_n) {
     int x_0 = 0;
     int y_0 = 0;
     int x_1 = 0;
     int y_1 = 0;
-    stbtt_GetCodepointBitmapBox(&g_font, (int)cp, scale, scale, &x_0, &y_0, &x_1, &y_1);
+    if (font == NULL) {
+        font = &g_font;
+    }
+    stbtt_GetCodepointBitmapBox(font, (int)cp, scale, scale, &x_0, &y_0, &x_1, &y_1);
     int w = x_1 - x_0;
     int h = y_1 - y_0;
     *x0 = x_0;
@@ -425,20 +447,22 @@ static const unsigned char *glyph_bits(unsigned cp, float scale, int *x0, int *y
         }
     }
     if (milli > 0 && bytes <= 48u * 48u) {
-        unsigned start = (cp * 131u + (unsigned)milli) % (unsigned)GLYPH_CACHE;
+        unsigned start = (cp * 131u + (unsigned)milli + (unsigned)face * 17u) % (unsigned)GLYPH_CACHE;
         for (unsigned n = 0; n < 4u; n++) {
             struct GlyphBit *hit = &g_glyph[(start + n) % (unsigned)GLYPH_CACHE];
-            if (hit->alpha != NULL && hit->cp == cp && hit->scale_milli == milli && hit->gw == w && hit->gh == h) {
+            if (hit->alpha != NULL && hit->cp == cp && hit->face == (unsigned)face && hit->scale_milli == milli &&
+                hit->gw == w && hit->gh == h) {
                 return hit->alpha;
             }
         }
         unsigned char *born = malloc(bytes);
         if (born != NULL) {
-            stbtt_MakeCodepointBitmap(&g_font, born, w, h, w, scale, scale, (int)cp);
+            stbtt_MakeCodepointBitmap(font, born, w, h, w, scale, scale, (int)cp);
             struct GlyphBit *slot = &g_glyph[start];
             free(slot->alpha);
             slot->alpha = born;
             slot->cp = cp;
+            slot->face = (unsigned)face;
             slot->scale_milli = milli;
             slot->gw = w;
             slot->gh = h;
@@ -448,12 +472,14 @@ static const unsigned char *glyph_bits(unsigned cp, float scale, int *x0, int *y
     if (scratch == NULL || scratch_n <= 0 || (size_t)scratch_n < bytes) {
         return NULL;
     }
-    stbtt_MakeCodepointBitmap(&g_font, scratch, w, h, w, scale, scale, (int)cp);
+    stbtt_MakeCodepointBitmap(font, scratch, w, h, w, scale, scale, (int)cp);
     return scratch;
 }
 
 int page_set_font(const unsigned char *ttf, int len) {
     g_font_ok = 0;
+    g_style_ok[0] = 0;
+    g_style_ok[1] = 0;
     glyph_cache_clear();
     if (ttf == NULL || len <= 0) {
         return -1;
@@ -463,6 +489,26 @@ int page_set_font(const unsigned char *ttf, int len) {
         return -1;
     }
     g_font_ok = 1;
+    return 0;
+}
+
+int page_set_style(int which, const unsigned char *ttf, int len) {
+    int slot = 0;
+    int offset = 0;
+    if (which < 1 || which > 2) {
+        return -1;
+    }
+    slot = which - 1;
+    g_style_ok[slot] = 0;
+    glyph_cache_clear();
+    if (ttf == NULL || len <= 0) {
+        return 0;
+    }
+    offset = stbtt_GetFontOffsetForIndex(ttf, 0);
+    if (offset < 0 || !stbtt_InitFont(&g_style[slot], ttf, offset)) {
+        return -1;
+    }
+    g_style_ok[slot] = 1;
     return 0;
 }
 
@@ -558,6 +604,35 @@ static void fill_rect(uint8_t *px, int width, int height, int x, int y, int w, i
     }
 }
 
+void page_draw_plate(uint8_t *px, int width, int height, int x, int y, int w, int h, int rows) {
+    int pr = 0;
+    int pg = 0;
+    int pb = 0;
+    int rr = 0;
+    int rg = 0;
+    int rb = 0;
+    if (px == NULL || w < 2 || h < 2) {
+        return;
+    }
+    g_dim = 0;
+    slot_rgb(SLOT_PAPER, &pr, &pg, &pb);
+    slot_rgb(SLOT_RULE, &rr, &rg, &rb);
+    fill_rect(px, width, height, x, y, w, h, pr, pg, pb);
+    fill_rect(px, width, height, x, y, w, 1, rr, rg, rb);
+    fill_rect(px, width, height, x, y + h - 1, w, 1, rr, rg, rb);
+    fill_rect(px, width, height, x, y, 1, h, rr, rg, rb);
+    fill_rect(px, width, height, x + w - 1, y, 1, h, rr, rg, rb);
+    if (rows > 1 && h / rows > 1) {
+        int row_h = h / rows;
+        for (int i = 1; i < rows; i++) {
+            int yy = y + i * row_h;
+            if (yy > y && yy < y + h - 1) {
+                fill_rect(px, width, height, x, yy, w, 1, rr, rg, rb);
+            }
+        }
+    }
+}
+
 static void solid_bar(uint8_t *px, int width, int height, int x, int y, int w, int h) {
     int r, g, b;
     slot_rgb(SLOT_INK, &r, &g, &b);
@@ -573,6 +648,25 @@ static void solid_bar(uint8_t *px, int width, int height, int x, int y, int w, i
 
 enum { KIND_BODY = 0, KIND_HEAD = 1, KIND_EM = 2, KIND_CODE = 3, KIND_LINK = 4, KIND_LIST = 5, KIND_QUOTE = 6,
        KIND_STRIKE = 7, KIND_RULE = 8, KIND_TABLE = 9, KIND_IMAGE = 10, KIND_SKIP = 11, KIND_STRONG = 12 };
+
+static stbtt_fontinfo *style_font(int kind, int *face) {
+    if (kind == KIND_STRONG && g_style_ok[0]) {
+        if (face != NULL) {
+            *face = 1;
+        }
+        return &g_style[0];
+    }
+    if (kind == KIND_EM && g_style_ok[1]) {
+        if (face != NULL) {
+            *face = 2;
+        }
+        return &g_style[1];
+    }
+    if (face != NULL) {
+        *face = 0;
+    }
+    return &g_font;
+}
 
 enum { TABLE_COLS = 8 };
 
@@ -1704,13 +1798,15 @@ static long long span_width(const char *text, size_t off, size_t len, size_t hid
             prev = 0;
             have_prev = 0;
         } else {
-            stbtt_GetCodepointHMetrics(&g_font, (int)cp, &ax, &lsb);
+            int span_kind = mark != NULL && at >= off && at - off < len ? mark[at - off] : KIND_BODY;
+            stbtt_fontinfo *span_font = style_font(span_kind, NULL);
+            stbtt_GetCodepointHMetrics(span_font, (int)cp, &ax, &lsb);
             advance = (long long)(ax * scale + 0.5f);
             if (advance < 1) {
                 advance = 1;
             }
             if (have_prev) {
-                kern = (long long)(stbtt_GetCodepointKernAdvance(&g_font, prev, (int)cp) * scale);
+                kern = (long long)(stbtt_GetCodepointKernAdvance(span_font, prev, (int)cp) * scale);
             }
             prev = (int)cp;
             have_prev = 1;
@@ -1856,6 +1952,9 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         if (glyph_hidden(text, off, len, hide, source, mark, at)) {
             continue;
         }
+        int kind_here = mark != NULL && at >= off && at - off < len ? mark[at - off] : uniform;
+        int face_here = 0;
+        stbtt_fontinfo *face_font = style_font(kind_here, &face_here);
         long long advance = space_px;
         int glyph = cp != '\t';
         if (cp == '\t') {
@@ -1865,7 +1964,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         int ax = 0;
         int lsb = 0;
         if (glyph) {
-            stbtt_GetCodepointHMetrics(&g_font, (int)cp, &ax, &lsb);
+            stbtt_GetCodepointHMetrics(face_font, (int)cp, &ax, &lsb);
             advance = (long long)(ax * scale + 0.5f);
             if (advance < 1) {
                 advance = 1;
@@ -1873,7 +1972,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         }
         long long kern = 0;
         if (glyph && prev != 0 && x > origin_x) {
-            kern = (long long)(stbtt_GetCodepointKernAdvance(&g_font, prev, (int)cp) * scale);
+            kern = (long long)(stbtt_GetCodepointKernAdvance(face_font, prev, (int)cp) * scale);
         }
         if (cp == ' ' || cp == '\t') {
             word_open = 0;
@@ -1910,19 +2009,19 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             if (g_line_clip) {
                 break;
             }
-            int space = cp == ' ' || cp == '\t';
-            x = origin_x;
-            if (row < UINT32_MAX) {
-                row++;
-            }
-            prev = 0;
-            kern = 0;
-            row_x = x;
-            word_open = space ? 0 : 1;
-            if (caret >= off && caret <= end) {
-                paint_caret_band(px, width, height, row, row0, line_h, scroll, origin_y);
-            }
-            if (space) {
+            /* Only a space starts the next line. The rest of a word stays on this one. */
+            if (cp == ' ' || cp == '\t') {
+                x = origin_x;
+                if (row < UINT32_MAX) {
+                    row++;
+                }
+                prev = 0;
+                kern = 0;
+                row_x = x;
+                word_open = 0;
+                if (caret >= off && caret <= end) {
+                    paint_caret_band(px, width, height, row, row0, line_h, scroll, origin_y);
+                }
                 consider(at, x, (int)row);
                 consider(i, x, (int)row);
                 continue;
@@ -1964,7 +2063,8 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             int gw = 0;
             int gh = 0;
             unsigned char scratch[256 * 256];
-            const unsigned char *bitmap = glyph_bits(cp, scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
+            const unsigned char *bitmap =
+                glyph_bits(face_here, face_font, cp, scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
             if (bitmap != NULL) {
                 int sy = screen_row(row_y, scroll, origin_y);
                 int cr, cg, cb;
@@ -1973,29 +2073,45 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                 int dest_y = sy + baseline + y0;
                 for (int by = 0; by < gh; by++) {
                     for (int bx = 0; bx < gw; bx++) {
-                        blend(px, width, height, dest_x + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                        if (dest_x + bx < max_x) {
+                            blend(px, width, height, dest_x + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                        }
                     }
                 }
-                /* The regular face has no bold. A second stamp is the strong weight. */
-                if (kind == KIND_STRONG && dest_x < INT_MAX) {
+                /* A downloaded bold face is the strong weight. Otherwise stamp the regular glyph again. */
+                if (kind == KIND_STRONG && face_here == 0 && dest_x < INT_MAX) {
                     for (int by = 0; by < gh; by++) {
                         for (int bx = 0; bx < gw; bx++) {
-                            blend(px, width, height, dest_x + 1 + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                            if (dest_x + 1 + bx < max_x) {
+                                blend(px, width, height, dest_x + 1 + bx, dest_y + by, bitmap[by * gw + bx], cr, cg, cb);
+                            }
                         }
                     }
                 }
             }
         }
-        if (draw && on_screen && px != NULL && kind == KIND_STRIKE && text[at] != '~' && advance > 0) {
+        if (draw && on_screen && px != NULL && kind == KIND_STRIKE && text[at] != '~' && advance > 0 && x < max_x) {
             int sy = screen_row(row_y, scroll, origin_y);
             if (sy != INT_MIN) {
                 int sr, sg, sb;
+                long long span = advance;
                 slot_rgb(SLOT_STRIKE, &sr, &sg, &sb);
                 int thick = line_h / 14;
+                int top = 0;
                 if (thick < 2) {
                     thick = 2;
                 }
-                fill_rect(px, width, height, x, sy + line_h / 2, (int)advance, thick, sr, sg, sb);
+                /* The bar is centered on the x-height, not the line box. Leading sits below the letters. */
+                top = sy + g_strike_center - thick / 2;
+                if (top < sy) {
+                    top = sy;
+                }
+                if ((long long)x + span > max_x) {
+                    span = (long long)max_x - x;
+                }
+                if (span > 0) {
+                    fill_rect(px, width, height, x, top, (int)span, thick, sr, sg, sb);
+                }
             }
         }
         long long next = (long long)x + advance;
@@ -2788,6 +2904,61 @@ int page_sel_edge(int x, int y, int slop) {
     return -1;
 }
 
+int page_link_url(const char *text, size_t len, size_t at, char *out, size_t cap) {
+    size_t line = 0;
+    size_t end = 0;
+    if (text == NULL || out == NULL || cap < 9 || at > len) {
+        return -1;
+    }
+    out[0] = '\0';
+    line = at;
+    while (line > 0 && text[line - 1] != '\n') {
+        line--;
+    }
+    end = at;
+    while (end < len && text[end] != '\n') {
+        end++;
+    }
+    for (size_t i = line; i < end; i++) {
+        size_t bracket = 0;
+        size_t url = 0;
+        size_t close = 0;
+        size_t n = 0;
+        if (text[i] != '[') {
+            continue;
+        }
+        if (i > line && text[i - 1] == '!') {
+            continue;
+        }
+        bracket = i + 1;
+        while (bracket < end && text[bracket] != ']') {
+            bracket++;
+        }
+        if (bracket + 1 >= end || text[bracket] != ']' || text[bracket + 1] != '(') {
+            continue;
+        }
+        url = bracket + 2;
+        close = url;
+        while (close < end && text[close] != ')') {
+            close++;
+        }
+        if (close >= end || at < i || at > close) {
+            continue;
+        }
+        n = close - url;
+        if (n + 1 > cap || n < 7) {
+            return -1;
+        }
+        if (!(n >= 8 && memcmp(text + url, "https://", 8) == 0) && !(n >= 7 && memcmp(text + url, "http://", 7) == 0)) {
+            return -1;
+        }
+        memcpy(out, text + url, n);
+        out[n] = '\0';
+        return 0;
+    }
+    return -1;
+}
+
 int page_caret_near(int x, int y, int slop) {
     if (g_bar_h <= 0) {
         return 0;
@@ -2804,6 +2975,16 @@ int page_caret_near(int x, int y, int slop) {
         dy = -dy;
     }
     return dx <= slop && dy <= slop + g_bar_h / 2;
+}
+
+int page_caret_box(int *x, int *y, int *h) {
+    if (x == NULL || y == NULL || h == NULL || g_bar_h <= 0) {
+        return -1;
+    }
+    *x = g_bar_x;
+    *y = g_bar_y;
+    *h = g_bar_h;
+    return 0;
 }
 
 static int text_width(const char *s, size_t n, float scale) {
@@ -3552,6 +3733,21 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
     }
     int line_h = with_lead((int)line_raw);
     int baseline = (int)base_raw;
+    {
+        int bx0 = 0;
+        int by0 = 0;
+        int bx1 = 0;
+        int by1 = 0;
+        g_strike_center = baseline / 2;
+        if (stbtt_GetCodepointBox(&g_font, 'x', &bx0, &by0, &bx1, &by1) != 0) {
+            int mid = (by0 + by1) / 2;
+            int above = (int)((float)mid * scale + 0.5f);
+            g_strike_center = baseline - above;
+        }
+        if (g_strike_center < 1) {
+            g_strike_center = 1;
+        }
+    }
     int sax = 0;
     int slsb = 0;
     stbtt_GetCodepointHMetrics(&g_font, ' ', &sax, &slsb);
@@ -4010,7 +4206,7 @@ void page_draw_labels(uint8_t *px, int width, int height, int n, const int *xs, 
             int gh = 0;
             unsigned char scratch[128 * 128];
             const unsigned char *bitmap =
-                glyph_bits((unsigned)*p, scale, &gx0, &gy0, &gw, &gh, scratch, (int)sizeof scratch);
+                glyph_bits(0, &g_font, (unsigned)*p, scale, &gx0, &gy0, &gw, &gh, scratch, (int)sizeof scratch);
             if (bitmap != NULL && gw <= 128 && gh <= 128) {
                 for (int by = 0; by < gh; by++) {
                     for (int bx = 0; bx < gw; bx++) {

@@ -67,6 +67,9 @@ int doc_toggle_task(Doc *doc, size_t byte_off);
    Returns -1 when the caret is not in a table. */
 int doc_table_tab(Doc *doc, int dir);
 
+/* 1 adds a column after the caret cell. -1 removes the caret column when another remains. */
+int doc_table_column(Doc *doc, int dir);
+
 /* Move the caret and keep the anchor, so the selection grows or shrinks. */
 void doc_extend(Doc *doc, int codepoints);
 
