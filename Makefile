@@ -17,7 +17,7 @@ ABIS := arm64-v8a x86_64
 CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -fPIC -I$(GLUE) -Isrc -Ithird_party
 GLUE_CFLAGS := -std=c11 -O2 -fPIC -I$(GLUE) -Wno-unused-parameter
 LDFLAGS := -shared -pthread -Wl,-z,max-page-size=16384 -Wl,-u,ANativeActivity_onCreate \
-	-landroid -llog -lEGL -lGLESv2 -lm
+	-landroid -llog -lEGL -lGLESv2 -lm -lz
 
 .PHONY: all test apk release install clean
 .SECONDARY:
@@ -48,13 +48,18 @@ build/fontlist_test: src/fontlist.c src/fontlist_test.c src/fontlist.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/fontlist_test.c src/fontlist.c
 
-test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test build/fontlist_test
+build/image_test: src/image.c src/image_test.c src/image.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/image_test.c src/image.c -lz
+
+test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test build/fontlist_test build/image_test
 	./build/doc_test
 	./build/page_test
 	./build/chrome_test
 	./build/ime_test
 	./build/html_test
 	./build/fontlist_test
+	./build/image_test
 
 build/obj/%/chrome.o: src/chrome.c src/chrome.h
 	mkdir -p $(dir $@)
@@ -88,7 +93,11 @@ build/obj/%/fontlist.o: src/fontlist.c src/fontlist.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/fontlist.c
 
-build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/fontlist.o build/obj/%/glue.o
+build/obj/%/image.o: src/image.c src/image.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/image.c
+
+build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/fontlist.o build/obj/%/image.o build/obj/%/glue.o
 	@test -n "$(NDK)" || (echo "NDK not found under $(ANDROID_HOME)/ndk" && exit 1)
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(LDFLAGS) -o $@ $^

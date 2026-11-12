@@ -95,6 +95,6 @@ int doc_load_bytes(Doc *doc, const char *bytes, size_t n);
 int doc_load(Doc *doc, const char *path);
 
 /* Write the document to path by renaming a temporary file next to it. */
-int doc_save(const Doc *doc, const char *path);
+int doc_save(Doc *doc, const char *path);
 
 #endif

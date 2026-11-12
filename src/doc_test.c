@@ -330,6 +330,46 @@ static void test_selection_and_undo(void) {
     doc_free(many);
 }
 
+static void test_save_tail(void) {
+    const char *path = "build/note-tail.md";
+    Doc *doc = doc_new();
+    char buf[32];
+    FILE *file = NULL;
+    doc_insert(doc, "hello", 5);
+    expect(doc_save(doc, path) == 0, "tail save");
+    expect(doc_save(doc, path) == 0, "a clean save writes nothing new");
+    doc_insert(doc, "!", 1);
+    expect(doc_save(doc, path) == 0, "append save");
+    file = fopen(path, "rb");
+    expect(file != NULL, "tail file");
+    if (file != NULL) {
+        size_t n = fread(buf, 1, sizeof buf - 1, file);
+        fclose(file);
+        buf[n] = '\0';
+        expect(strcmp(buf, "hello!") == 0, "the append is on disk");
+    }
+    expect(doc_backspace(doc) == 0, "delete the appended mark");
+    expect(doc_save(doc, path) == 0, "shorten save");
+    file = fopen(path, "rb");
+    if (file != NULL) {
+        size_t n = fread(buf, 1, sizeof buf - 1, file);
+        fclose(file);
+        buf[n] = '\0';
+        expect(strcmp(buf, "hello") == 0, "the end was cut");
+    }
+    doc_move(doc, -5);
+    expect(doc_insert(doc, "X", 1) == 0, "insert in the middle");
+    expect(doc_save(doc, path) == 0, "middle save");
+    file = fopen(path, "rb");
+    if (file != NULL) {
+        size_t n = fread(buf, 1, sizeof buf - 1, file);
+        fclose(file);
+        buf[n] = '\0';
+        expect(strcmp(buf, "Xhello") == 0, "a middle edit replaces the file");
+    }
+    doc_free(doc);
+}
+
 static void test_save_load(void) {
     const char *path = "build/note-test.md";
     Doc *doc = doc_new();
@@ -481,6 +521,7 @@ int main(void) {
     test_rows();
     test_load_bytes();
     test_selection_and_undo();
+    test_save_tail();
     test_save_load();
     test_rope();
     test_mark();

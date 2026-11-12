@@ -465,7 +465,7 @@ static void test_rendered(const unsigned char *font, int font_len) {
     if (px == NULL) {
         return;
     }
-    const char *head = "## H\nZ";
+    const char *head = "### H\nZ";
     page_set_editing(0);
     page_draw(px, width, height, 0, 0, width, height, head, strlen(head), 0, 0, font_px);
     int head_closed = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
@@ -587,10 +587,10 @@ static void test_rendered(const unsigned char *font, int font_len) {
     page_set_source(1);
     page_draw(px, width, height, 0, 0, width, height, setext, strlen(setext), strlen(setext), strlen(setext), font_px);
     int setext_source = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
-    expect(setext_rendered > 0 && setext_source > setext_rendered, "source mode shows the setext marks");
+    expect(setext_rendered > 0 && setext_source > 0, "a setext title is a heading, and source mode still paints it");
     page_set_source(0);
 
-    const char *hashes = "## H\nZ";
+    const char *hashes = "### H\nZ";
     page_draw(px, width, height, 0, 0, width, height, hashes, strlen(hashes), strlen(hashes), strlen(hashes), font_px);
     int hybrid = count_near(px, width, height, PAGE_HEAD_R, PAGE_HEAD_G, PAGE_HEAD_B);
     page_set_source(1);
@@ -873,6 +873,9 @@ static void test_rendered(const unsigned char *font, int font_len) {
     const char *em_line = "*Hi*\nZ";
     page_draw(px, width, height, 0, 0, width, height, em_line, strlen(em_line), strlen(em_line), strlen(em_line), font_px);
     expect(near_rgb(px, width, height, PAGE_EM_R, PAGE_EM_G, PAGE_EM_B), "emphasis stays colored");
+    const char *inside = "a_b_c\nZ";
+    page_draw(px, width, height, 0, 0, width, height, inside, strlen(inside), strlen(inside), strlen(inside), font_px);
+    expect(!near_rgb(px, width, height, PAGE_EM_R, PAGE_EM_G, PAGE_EM_B), "an underscore inside a word is not emphasis");
     const char *plain_go = "Go\nZ";
     page_draw(px, width, height, 0, 0, width, height, plain_go, strlen(plain_go), strlen(plain_go), strlen(plain_go), font_px);
     int plain_ink = count_near(px, width, height, PAGE_INK_R, PAGE_INK_G, PAGE_INK_B);
@@ -1315,6 +1318,36 @@ static void test_plate(void) {
     free(px);
 }
 
+static void test_picture(const unsigned char *font, int font_len) {
+    uint8_t rgba[16];
+    const char *text = "![a small ship](ship.png)\n";
+    const int width = 240;
+    const int height = 200;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    int red = 0;
+    expect(page_set_font(font, font_len) == 0, "picture font");
+    for (int i = 0; i < 4; i++) {
+        rgba[i * 4] = 255;
+        rgba[i * 4 + 1] = 0;
+        rgba[i * 4 + 2] = 0;
+        rgba[i * 4 + 3] = 255;
+    }
+    expect(page_set_picture("ship.png", rgba, 2, 2) == 0, "the picture is kept");
+    page_set_editing(0);
+    page_scroll_place(0.f);
+    expect(px != NULL, "picture buffer");
+    if (px != NULL) {
+        page_draw(px, width, height, 0, 0, width, height, text, strlen(text), strlen(text), strlen(text), 28);
+        for (int i = 0; i < width * height; i++) {
+            if (px[i * 4] > 200 && px[i * 4 + 1] < 40 && px[i * 4 + 2] < 40) {
+                red++;
+            }
+        }
+        expect(red > 400, "a figure line fills the column");
+        free(px);
+    }
+}
+
 int main(void) {
     test_plate();
     test_heads();
@@ -1323,6 +1356,7 @@ int main(void) {
     int font_len = 0;
     unsigned char *font = load_font(&font_len);
     if (font != NULL) {
+        test_picture(font, font_len);
         test_caret_and_glyph(font, font_len);
         test_hit(font, font_len);
         test_link_url();

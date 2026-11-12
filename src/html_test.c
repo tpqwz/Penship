@@ -32,6 +32,51 @@ int main(void) {
     has(html, "<th>A</th>", "header cell");
     has(html, "<td>1</td>", "body cell");
     has(html, "href=\"http://x.test\"", "link");
+    {
+        char *pic = NULL;
+        size_t pic_n = 0;
+        const char *image = "![a \"ship\"](ship.png)\n";
+        expect(html_export(image, strlen(image), &pic, &pic_n) == 0, "image export");
+        has(pic, "<img alt=\"a &quot;ship&quot;\" src=\"ship.png\">", "an image keeps its alt text and path");
+        free(pic);
+    }
+    {
+        char *more = NULL;
+        size_t more_n = 0;
+        const char *marks =
+            "Penship\n========\n\nFoo\n---\n\n---\n\n"
+            "__Bold__ and _slanted_ and *star* and **two** and \\*stars\\* and a_b_c\n\n"
+            "See [the note][sample] and [sample] and [missing][nope].\n\n"
+            "[sample]: https://penship.app\n\n"
+            "Write <https://penship.app> or <me@penship.app>.\n\n"
+            "    a < b\n\n"
+            "Between.\n\n"
+            "    one\n\n"
+            "    two\n";
+        const char *hr;
+        expect(html_export(marks, strlen(marks), &more, &more_n) == 0, "marks export");
+        has(more, "<h1>Penship</h1>", "setext title");
+        has(more, "<h2>Foo</h2>", "setext section");
+        expect(more != NULL && strstr(more, "========") == NULL, "the underline is not copied");
+        hr = more == NULL ? NULL : strstr(more, "<hr>");
+        expect(hr != NULL && strstr(hr + 4, "<hr>") == NULL, "the underline is not a rule");
+        has(more, "<strong>Bold</strong>", "underscore strong");
+        has(more, "<em>slanted</em>", "underscore emphasis");
+        has(more, "<em>star</em>", "star emphasis");
+        has(more, "<strong>two</strong>", "star strong");
+        has(more, "*stars*", "a slash keeps the stars");
+        expect(more != NULL && strstr(more, "<em>b</em>") == NULL, "an underscore inside a word stays a word");
+        expect(more != NULL && strstr(more, "<em>stars</em>") == NULL, "escaped stars are not emphasis");
+        has(more, "href=\"https://penship.app\"", "reference address");
+        has(more, ">the note</a>", "reference words");
+        has(more, ">sample</a>", "shortcut reference");
+        has(more, "[missing][nope]", "an unknown reference stays");
+        expect(more != NULL && strstr(more, "[sample]") == NULL, "a known label is not left in brackets");
+        has(more, "href=\"mailto:me@penship.app\"", "mail address");
+        has(more, "<pre><code>a &lt; b\n</code></pre>", "indented code");
+        has(more, "<pre><code>one\n\ntwo\n</code></pre>", "a blank line stays in the indented block");
+        free(more);
+    }
     expect(strstr(html, "---") == NULL, "the delimiter row is not a body row");
     free(html);
     if (fail) {

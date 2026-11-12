@@ -2,11 +2,11 @@
 
 A native Android markdown editor. This is **0.1.3-alpha**.
 
-![The sample, rendered, with the menu mark](docs/writing.png)
+![The sample at night, with the section header and the format bar](docs/writing.png)
 
 ![Open, Save, and the other options](docs/menu.png)
 
-The pictures are painted by the app at 1080 px wide, the phone's density of 460, and a font scale of 1.3. They are not a photograph of the status bar. The long sample is the note a new install starts with. The menu mark opens Open, Save, Save as, Export, Contents, Find, and Settings. The word count is on the Open row.
+The pictures are painted by the app at 1080 px wide, the phone's density of 460, and a font scale of 1.3. They are not a photograph of the status bar. The writing picture is the night page: the section header, the rendered sample, and the format bar. The long sample is the note a new install starts with. The menu mark opens Open, Save, Save as, Export, Contents, Find, and Settings. The word count is on the Open row and stops before the mark.
 
 A push to `master` builds the app and publishes a pre-release. The attached file, `penship-android.apk`, is a release build: `arm64-v8a` and `x86_64` in one APK, native libraries stripped, not debuggable. It is signed with a debug keystore from that build, so it still replaces an install from an earlier file in this series. A tag such as `v0.2.0` publishes a release of the same package. F-Droid would rebuild that tag and sign it with their own key, which will not replace this install.
 

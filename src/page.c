@@ -808,23 +808,55 @@ static int atx_level(const char *s, size_t n) {
     return level;
 }
 
-/* A rendered single-hash heading uses two body rows and a larger face.
+static int setext_level(const char *s, size_t n);
+
+/* 1 or 2 when this line is a heading that should be larger than the paragraph. The underline itself stays put. */
+static int line_level(const char *text, size_t text_len, size_t off, size_t content) {
+    int atx = 0;
+    size_t i = 0;
+    size_t a = 0;
+    size_t b = 0;
+    if (text == NULL || off > text_len || content > text_len - off) {
+        return 0;
+    }
+    atx = atx_level(text + off, content);
+    if (atx > 0) {
+        return atx;
+    }
+    if (content == 0) {
+        return 0;
+    }
+    i = off + content;
+    if (i >= text_len || text[i] != '\n') {
+        return 0;
+    }
+    a = i + 1;
+    b = a;
+    while (b < text_len && text[b] != '\n') {
+        b++;
+    }
+    return setext_level(text + a, b - a);
+}
+
+/* A level-1 heading uses two body rows and the largest face. A level-2 heading uses two rows and a middle face.
    A source line stays body size so the marks do not jump. */
-static void head_face(const char *text, size_t off, size_t content, int source, int line_h, float scale, int *use_h,
-                      float *use_scale, int *slots) {
+static void head_face(const char *text, size_t text_len, size_t off, size_t content, int source, int line_h,
+                      float scale, int *use_h, float *use_scale, int *slots) {
+    int level = 0;
     *use_h = line_h < 1 ? 1 : line_h;
     *use_scale = scale;
     *slots = 1;
     if (source) {
         return;
     }
-    if (atx_level(text + off, content) != 1) {
+    level = line_level(text, text_len, off, content);
+    if (level != 1 && level != 2) {
         return;
     }
     if (*use_h <= INT_MAX / 2) {
         *use_h *= 2;
     }
-    *use_scale = scale * 1.5f;
+    *use_scale = level == 1 ? scale * 1.5f : scale * 1.25f;
     *slots = 2;
 }
 
@@ -1383,8 +1415,63 @@ static int mark_definition(const char *s, size_t n, uint8_t *mark) {
     return 1;
 }
 
-/* shortcut: emphasis is a same-line * or _ pair, not CommonMark flanking rules.
-   A backslash before punctuation is literal. Inline marks are skipped on a line longer than 256 KiB. */
+static int flank_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* Left means the mark can open. Right means it can close. An underscore that can do both stays inside the word. */
+static int flank_left(const char *s, size_t n, size_t i, int len) {
+    size_t after = i + (size_t)len;
+    int before_ok = 0;
+    if (after >= n || flank_space((unsigned char)s[after])) {
+        return 0;
+    }
+    before_ok = i == 0 || flank_space((unsigned char)s[i - 1]) || md_punct((unsigned char)s[i - 1]);
+    if (md_punct((unsigned char)s[after]) && !before_ok) {
+        return 0;
+    }
+    return 1;
+}
+
+static int flank_right(const char *s, size_t n, size_t i, int len) {
+    size_t after = i + (size_t)len;
+    int after_ok = 0;
+    if (i == 0 || flank_space((unsigned char)s[i - 1])) {
+        return 0;
+    }
+    after_ok = after >= n || flank_space((unsigned char)s[after]) || md_punct((unsigned char)s[after]);
+    if (md_punct((unsigned char)s[i - 1]) && !after_ok) {
+        return 0;
+    }
+    return 1;
+}
+
+static int can_open(const char *s, size_t n, size_t i, int len, char marker) {
+    int left = flank_left(s, n, i, len);
+    int right = flank_right(s, n, i, len);
+    if (!left) {
+        return 0;
+    }
+    if (marker == '_' && right) {
+        return 0;
+    }
+    return 1;
+}
+
+static int can_close(const char *s, size_t n, size_t i, int len, char marker) {
+    int left = flank_left(s, n, i, len);
+    int right = flank_right(s, n, i, len);
+    if (!right) {
+        return 0;
+    }
+    if (marker == '_' && left) {
+        return 0;
+    }
+    return 1;
+}
+
+/* A same-line * or _ pair. An underscore inside a word stays a word. A backslash before punctuation is literal.
+   Inline marks are skipped on a line longer than 256 KiB. */
 static void mark_inline(const char *s, size_t n, uint8_t *mark) {
     memset(mark, KIND_BODY, n);
     if (mark_definition(s, n, mark)) {
@@ -1538,24 +1625,33 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
         }
         if ((s[i] == '*' || s[i] == '_') && i + 1 < n) {
             int strong = s[i + 1] == s[i];
+            int len = strong ? 2 : 1;
             char marker = s[i];
-            size_t j = i + (strong ? 2 : 1);
+            size_t j = i + (size_t)len;
             int found = 0;
-            while (j < n) {
-                size_t skip = escaped_punct(s, n, j);
-                if (skip != j) {
-                    j = skip;
-                    continue;
+            if (can_open(s, n, i, len, marker)) {
+                while (j < n) {
+                    size_t skip = escaped_punct(s, n, j);
+                    if (skip != j) {
+                        j = skip;
+                        continue;
+                    }
+                    if (strong && j + 1 < n && s[j] == marker && s[j + 1] == marker) {
+                        if (can_close(s, n, j, 2, marker)) {
+                            found = 1;
+                            break;
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    if (!strong && s[j] == marker && (j + 1 >= n || s[j + 1] != marker)) {
+                        if (can_close(s, n, j, 1, marker)) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                    j++;
                 }
-                if (strong && j + 1 < n && s[j] == marker && s[j + 1] == marker) {
-                    found = 1;
-                    break;
-                }
-                if (!strong && s[j] == marker && (j + 1 >= n || s[j + 1] != marker)) {
-                    found = 1;
-                    break;
-                }
-                j++;
             }
             if (found) {
                 size_t end = strong ? j + 1 : j;
@@ -1816,6 +1912,20 @@ static long long span_width(const char *text, size_t off, size_t len, size_t hid
     return width;
 }
 
+enum { PIC_MAX = 8, PIC_NAME = 96 };
+
+struct Pic {
+    char name[PIC_NAME];
+    uint8_t *px;
+    int w;
+    int h;
+};
+
+static struct Pic g_pic[PIC_MAX];
+
+static const struct Pic *picture_from_alt(const char *text, size_t off, size_t len, size_t at);
+static void blit_picture(uint8_t *px, int width, int height, const struct Pic *pic, int x, int y, int w, int h);
+
 static uint32_t layout_line(uint8_t *px, int width, int height, const char *text, size_t off, size_t len,
                             size_t caret, int origin_x, int max_x, int origin_y, int line_h, int baseline,
                             int space_px, float scale, int draw, uint64_t row0, uint64_t scroll, int view_h,
@@ -2049,6 +2159,38 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         /* shortcut: the newline that ends a line is not a highlighted cell. */
         int selected = sel_hi > sel_lo && at < sel_hi && at + (size_t)n > sel_lo;
         int kind = mark != NULL && at >= off && at - off < len ? mark[at - off] : uniform;
+        if (kind == KIND_IMAGE && mark != NULL) {
+            int image_start = at == off || mark[at - off - 1] != KIND_IMAGE;
+            if (image_start) {
+                const struct Pic *pic = picture_from_alt(text, off, len, at);
+                if (pic != NULL && pic->h > 0) {
+                    int box_h = line_h * 4 / 5;
+                    int box_w = (int)((long)pic->w * box_h / pic->h);
+                    int room = max_x - origin_x;
+                    if (box_h < 8) {
+                        box_h = 8;
+                    }
+                    if (box_w < 1) {
+                        box_w = 1;
+                    }
+                    if (room > 1 && box_w > room) {
+                        box_w = room;
+                    }
+                    glyph = 0;
+                    advance = box_w;
+                    if (draw && on_screen && px != NULL) {
+                        int sy = screen_row(row_y, scroll, origin_y);
+                        int top = sy + (line_h - box_h) / 2;
+                        if (sy != INT_MIN) {
+                            blit_picture(px, width, height, pic, x, top, box_w, box_h);
+                        }
+                    }
+                }
+            } else {
+                glyph = 0;
+                advance = 0;
+            }
+        }
         if (draw && on_screen && selected && px != NULL && advance > 0 && advance <= width) {
             int sy = screen_row(row_y, scroll, origin_y);
             if (sy != INT_MIN) {
@@ -2265,20 +2407,25 @@ static void keep_store(const struct Index *idx, const char *text, size_t text_le
     g_keep_ok = 1;
 }
 
-/* Row count changes with the caret only for a rendered level-1 heading, which takes two body rows.
+/* Row count changes with the caret for a rendered level-1 or level-2 heading, which takes two body rows.
    Every other line was measured as source, so a caret move does not rewrap it. */
-static int heading_slots(const char *text, struct Line line, size_t caret) {
+static int heading_slots(const char *text, size_t text_len, struct Line line, size_t caret) {
     int on = caret >= line.off && caret <= line.off + line.content;
     int source = !g_readonly && (g_source || (g_editing && on));
-    if (source || atx_level(text + line.off, line.content) != 1) {
+    int level = 0;
+    if (source) {
+        return 1;
+    }
+    level = line_level(text, text_len, line.off, line.content);
+    if (level != 1 && level != 2) {
         return 1;
     }
     return 2;
 }
 
-static void retarget_rows(const char *text, struct Line *line, size_t old_caret, size_t caret) {
-    int old_slots = heading_slots(text, *line, old_caret);
-    int slots = heading_slots(text, *line, caret);
+static void retarget_rows(const char *text, size_t text_len, struct Line *line, size_t old_caret, size_t caret) {
+    int old_slots = heading_slots(text, text_len, *line, old_caret);
+    int slots = heading_slots(text, text_len, *line, caret);
     if (old_slots == slots) {
         return;
     }
@@ -2310,7 +2457,7 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
         size_t end = line->off + line->content;
         int touch = (g_keep_caret >= line->off && g_keep_caret <= end) || (caret >= line->off && caret <= end);
         if (touch) {
-            retarget_rows(text, line, g_keep_caret, caret);
+            retarget_rows(text, text_len, line, g_keep_caret, caret);
         }
     }
     if (keep_copy(idx) != 0) {
@@ -2337,7 +2484,7 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
         int slots = 1;
         int cx = origin_x;
         int crow = 0;
-        head_face(text, line.off, line.content, source_line, line_h, scale, &use_h, &use_scale, &slots);
+        head_face(text, text_len, line.off, line.content, source_line, line_h, scale, &use_h, &use_scale, &slots);
         layout_line(NULL, 0, 0, text, line.off, line.content, caret, origin_x, max_x, 0, use_h, 0, space_px, use_scale,
                     0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
         uint64_t caret_y = 0;
@@ -2366,6 +2513,220 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
    A caret move reuses the stored rows and measures only the caret line. */
 static int table_point(const char *text, const struct Index *idx, size_t li, size_t caret, int origin_x, int max_x,
                        float scale, int space_px, int *out_x, int *out_row);
+
+int page_set_picture(const char *name, const uint8_t *rgba, int w, int h) {
+    size_t n = 0;
+    size_t bytes = 0;
+    uint8_t *copy = NULL;
+    int slot = -1;
+    if (name == NULL || rgba == NULL || w < 1 || h < 1 || w > 4096 || h > 4096) {
+        return -1;
+    }
+    n = strlen(name);
+    if (n == 0 || n >= PIC_NAME) {
+        return -1;
+    }
+    if ((size_t)w > SIZE_MAX / 4 / (size_t)h) {
+        return -1;
+    }
+    bytes = (size_t)w * (size_t)h * 4;
+    for (int i = 0; i < PIC_MAX; i++) {
+        if (g_pic[i].px != NULL && strcmp(g_pic[i].name, name) == 0) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 && g_pic[i].px == NULL) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        return -1;
+    }
+    copy = malloc(bytes);
+    if (copy == NULL) {
+        return -1;
+    }
+    memcpy(copy, rgba, bytes);
+    free(g_pic[slot].px);
+    memcpy(g_pic[slot].name, name, n + 1);
+    g_pic[slot].px = copy;
+    g_pic[slot].w = w;
+    g_pic[slot].h = h;
+    return 0;
+}
+
+static const struct Pic *find_picture(const char *name) {
+    if (name == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < PIC_MAX; i++) {
+        if (g_pic[i].px != NULL && strcmp(g_pic[i].name, name) == 0) {
+            return &g_pic[i];
+        }
+    }
+    return NULL;
+}
+
+int page_has_picture(const char *name) {
+    return find_picture(name) != NULL;
+}
+
+/* A line that is only an image mark. Writes the path. 1 when it is a figure. */
+static int figure_url(const char *text, size_t off, size_t len, char *url, size_t cap) {
+    size_t i = off;
+    size_t end = off + len;
+    size_t bracket = 0;
+    size_t close = 0;
+    size_t n = 0;
+    if (text == NULL || url == NULL || cap < 2) {
+        return 0;
+    }
+    while (i < end && (text[i] == ' ' || text[i] == '\t')) {
+        i++;
+    }
+    if (i + 4 >= end || text[i] != '!' || text[i + 1] != '[') {
+        return 0;
+    }
+    bracket = i + 2;
+    while (bracket < end && text[bracket] != ']' && text[bracket] != '\n') {
+        bracket++;
+    }
+    if (bracket + 1 >= end || text[bracket] != ']' || text[bracket + 1] != '(') {
+        return 0;
+    }
+    close = bracket + 2;
+    while (close < end && text[close] != ')' && text[close] != '\n' && text[close] != ' ') {
+        close++;
+    }
+    if (close >= end || text[close] != ')' || close == bracket + 2) {
+        return 0;
+    }
+    i = close + 1;
+    while (i < end && (text[i] == ' ' || text[i] == '\t')) {
+        i++;
+    }
+    if (i != end) {
+        return 0;
+    }
+    n = close - (bracket + 2);
+    if (n + 1 > cap || n >= PIC_NAME) {
+        return 0;
+    }
+    memcpy(url, text + bracket + 2, n);
+    url[n] = '\0';
+    return 1;
+}
+
+static void picture_box(const struct Pic *pic, int text_w, int *out_w, int *out_h) {
+    int w = pic->w;
+    int h = pic->h;
+    int cap = 0;
+    if (text_w < 1) {
+        text_w = 1;
+    }
+    if (w < 1) {
+        w = 1;
+    }
+    if (h < 1) {
+        h = 1;
+    }
+    h = (int)((long)h * text_w / w);
+    w = text_w;
+    if (h < 1) {
+        h = 1;
+    }
+    cap = text_w * 2;
+    if (cap < 1) {
+        cap = 1;
+    }
+    if (h > cap) {
+        w = (int)((long)w * cap / h);
+        h = cap;
+        if (w < 1) {
+            w = 1;
+        }
+    }
+    *out_w = w;
+    *out_h = h;
+}
+
+static const struct Pic *picture_from_alt(const char *text, size_t off, size_t len, size_t at) {
+    size_t end = off + len;
+    size_t i = at;
+    size_t close = 0;
+    size_t n = 0;
+    char url[PIC_NAME];
+    while (i > off && text[i] != '[') {
+        i--;
+    }
+    if (text[i] != '[' || i == off || text[i - 1] != '!') {
+        return NULL;
+    }
+    close = i + 1;
+    while (close < end && text[close] != ']' && text[close] != '\n') {
+        close++;
+    }
+    if (close + 1 >= end || text[close] != ']' || text[close + 1] != '(') {
+        return NULL;
+    }
+    i = close + 2;
+    close = i;
+    while (close < end && text[close] != ')' && text[close] != ' ' && text[close] != '\n') {
+        close++;
+    }
+    if (close >= end || text[close] != ')') {
+        return NULL;
+    }
+    n = close - i;
+    if (n == 0 || n >= PIC_NAME) {
+        return NULL;
+    }
+    memcpy(url, text + i, n);
+    url[n] = '\0';
+    return find_picture(url);
+}
+
+static void blit_picture(uint8_t *px, int width, int height, const struct Pic *pic, int x, int y, int w, int h) {
+    if (px == NULL || pic == NULL || pic->px == NULL || w < 1 || h < 1 || pic->w < 1 || pic->h < 1) {
+        return;
+    }
+    for (int row = 0; row < h; row++) {
+        int yy = y + row;
+        int sy = (int)((long)row * pic->h / h);
+        if (yy < 0 || yy >= height) {
+            continue;
+        }
+        if (sy < 0) {
+            sy = 0;
+        }
+        if (sy >= pic->h) {
+            sy = pic->h - 1;
+        }
+        for (int col = 0; col < w; col++) {
+            int xx = x + col;
+            int sx = (int)((long)col * pic->w / w);
+            const uint8_t *s;
+            uint8_t *d;
+            int a;
+            if (xx < 0 || xx >= width) {
+                continue;
+            }
+            if (sx < 0) {
+                sx = 0;
+            }
+            if (sx >= pic->w) {
+                sx = pic->w - 1;
+            }
+            s = pic->px + ((size_t)sy * (size_t)pic->w + (size_t)sx) * 4;
+            d = px + ((size_t)yy * (size_t)width + (size_t)xx) * 4;
+            a = s[3];
+            d[0] = (uint8_t)((s[0] * a + d[0] * (255 - a)) / 255);
+            d[1] = (uint8_t)((s[1] * a + d[1] * (255 - a)) / 255);
+            d[2] = (uint8_t)((s[2] * a + d[2] * (255 - a)) / 255);
+            d[3] = 255;
+        }
+    }
+}
 
 static int build_index(struct Index *idx, const char *text, size_t text_len, size_t caret, int origin_x, int max_x,
                        int line_h, int space_px, float scale) {
@@ -2444,7 +2805,7 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         int slots = 1;
         int on_caret = caret >= off && caret <= off + content;
         int source_line = !g_readonly && (g_source || (g_editing && on_caret));
-        head_face(text, off, content, source_line, line_h, scale, &use_h, &use_scale, &slots);
+        head_face(text, text_len, off, content, source_line, line_h, scale, &use_h, &use_scale, &slots);
         uint32_t rows = layout_line(NULL, 0, 0, text, off, content, caret, origin_x, max_x, 0, use_h, 0, space_px,
                                     use_scale, 0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
         if (rows == 0) {
@@ -2452,6 +2813,24 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
         if (slots == 2 && rows <= UINT32_MAX / 2) {
             rows *= 2;
+        }
+        if (!source_line) {
+            char url[PIC_NAME];
+            const struct Pic *pic = NULL;
+            if (figure_url(text, off, content, url, sizeof url) && (pic = find_picture(url)) != NULL) {
+                int box_w = 0;
+                int box_h = 0;
+                int text_w = max_x - origin_x;
+                uint32_t need = 1;
+                picture_box(pic, text_w, &box_w, &box_h);
+                if (line_h > 0) {
+                    need = (uint32_t)((box_h + line_h - 1) / line_h);
+                }
+                if (need < 1) {
+                    need = 1;
+                }
+                rows = need;
+            }
         }
         struct Line line = {off, content, rows, (uint8_t)kind};
         if (index_push(idx, line) != 0) {
@@ -3824,6 +4203,43 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         if (line.kind == KIND_TABLE && line.rows > 0 && next > scroll && y < window) {
             paint_table_line(px, width, height, text, &idx, li, origin_x, max_x, origin_y, line_h, baseline, scale,
                              space_px, y, scroll, view_h, caret);
+        } else if (!source && line.kind != KIND_TABLE && line.content > 0 && next > scroll && y < window) {
+            char url[PIC_NAME];
+            const struct Pic *pic = NULL;
+            if (figure_url(text, line.off, line.content, url, sizeof url) && (pic = find_picture(url)) != NULL) {
+                int box_w = 0;
+                int box_h = 0;
+                int sy = screen_row(y, scroll, origin_y);
+                picture_box(pic, max_x - origin_x, &box_w, &box_h);
+                if (px != NULL && sy != INT_MIN) {
+                    blit_picture(px, width, height, pic, origin_x, sy, box_w, box_h);
+                }
+            } else {
+                uint8_t *mark = NULL;
+                const uint8_t *marks = NULL;
+                if (line.kind == KIND_BODY && line.content <= (1u << 18)) {
+                    mark = malloc(line.content);
+                    if (mark != NULL) {
+                        mark_inline(text + line.off, line.content, mark);
+                        mark_block(text + line.off, line.content, mark);
+                        marks = mark;
+                    }
+                }
+                int cx = 0;
+                int crow = 0;
+                int use_h = line_h;
+                float use_scale = scale;
+                int slots = 1;
+                head_face(text, text_len, line.off, line.content, source, line_h, scale, &use_h, &use_scale, &slots);
+                int use_base = baseline;
+                if (slots == 2) {
+                    use_base = (int)((float)ascent * use_scale + 0.5f);
+                }
+                layout_line(px, width, height, text, line.off, line.content, caret, origin_x, max_x, origin_y, use_h,
+                            use_base, space_px, use_scale, 1, y, scroll, view_h, sel_lo, sel_hi, source, marks,
+                            line.kind, &cx, &crow);
+                free(mark);
+            }
         } else if (line.kind != KIND_TABLE && next > scroll && y < window && line.content > 0) {
             uint8_t *mark = NULL;
             const uint8_t *marks = NULL;
@@ -3840,7 +4256,7 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
             int use_h = line_h;
             float use_scale = scale;
             int slots = 1;
-            head_face(text, line.off, line.content, source, line_h, scale, &use_h, &use_scale, &slots);
+            head_face(text, text_len, line.off, line.content, source, line_h, scale, &use_h, &use_scale, &slots);
             int use_base = baseline;
             if (slots == 2) {
                 use_base = (int)((float)ascent * use_scale + 0.5f);
@@ -4099,7 +4515,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     int use_h = line_h;
     float use_scale = scale;
     int slots = 1;
-    head_face(text, line.off, line.content, source, line_h, scale, &use_h, &use_scale, &slots);
+    head_face(text, text_len, line.off, line.content, source, line_h, scale, &use_h, &use_scale, &slots);
     (void)slots;
     int hit_row = 0;
     if (use_h > 0 && into / (uint64_t)use_h <= (uint64_t)INT_MAX) {

@@ -5,7 +5,7 @@ A native note on a phone, painted from the markdown you type. This file is the l
 Penship
 ========
 
-A double tap or a press-and-hold selects the word and offers Copy. Cut and Paste are on that menu only while you can edit. A long press where there is no word offers Paste at the caret, and Read only hides it. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close. A table stays a grid: the caret sits in the cell, Tab steps across, and Enter moves down the column. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
+A double tap or a press-and-hold selects the word and offers Copy. Cut and Paste are on that menu only while you can edit. A long press where there is no word offers Paste at the caret, and Read only hides it. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close. A table stays a grid: the caret sits in the cell, Tab steps across, and Enter moves down the column. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two, and a heading of two is taller than the paragraph under it. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
 
 ## How to read this note
 
@@ -31,7 +31,11 @@ Inside a paragraph, `page_draw` is inline code. A fence, further down, is a bloc
 
 ## Pictures and links, as words
 
-An image shows its words, as in ![a small ship](ship.png), and hides the address when you are not on that line. The picture itself is not drawn. The alt text is the stand-in, in the link color, until a real image paint exists.
+An image on its own line is the picture, when that file is next to the note. A PNG or a JPEG from Wikimedia Commons is fetched once and kept.
+
+![the ship Endeavour](https://commons.wikimedia.org/wiki/Special:FilePath/Endeavour.png)
+
+The alt text stands in when the file is missing. On the caret line the marks stay visible so you can change the path.
 
 A link shows its words, as in [the Penship note](https://penship.app), and hides the address when you are not on that line. It is not fetched. Brackets and the address return when the caret is on the line, so you can edit them. The first tap only moves the caret. A later tap on that same http or https link opens it.
 
@@ -163,9 +167,17 @@ An address in angle brackets is a link, as in <https://penship.app>, and so is <
 
 ## Still ahead
 
-An image still shows words rather than a picture. Math would wait for a real renderer. Export in the menu writes HTML from this same buffer. AsciiDoc, MyST, and Typst would be compilers beside this painter, not a second syntax invented here.
+Math would wait for a real renderer. Export in the menu writes HTML from this same buffer. An image becomes an img tag with its alt text and path. An underlined title, underscores, a reference, an address in angle brackets, and an indented code block are kept too. AsciiDoc, MyST, and Typst would be compilers beside this painter, not a second syntax invented here.
 
 Until then, this note grows in place. The next feature appends a section rather than starting a new file.
+
+## Pictures
+
+An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
+
+![the ship Endeavour](https://commons.wikimedia.org/wiki/Special:FilePath/Endeavour.png)
+
+Inside a sentence the same file is drawn small, in place of the alt text. A missing file leaves the words. Any other web address is not fetched. On the caret line the marks stay visible, so the path can be changed.
 
 ## A longer stretch, for scrolling
 
@@ -183,11 +195,11 @@ Five. Copy and paste go through the Android clipboard. A clip longer than a mebi
 
 Six. The menu is the file: Open, Save, Save as, Export, Contents, Find, and Settings. Settings is the other screen: Smaller, Larger, Font, Typewriter, Focus, Line, Theme, Source, and Read only. The labels are large enough to read on a phone, and each row is at least a thumb tall. If the keyboard would cover the bottom of the list, the list scrolls. Opening the menu hides the keyboard. The menu mark closes the list and returns to the note. Back closes Contents, then Settings, then the menu, then the keyboard, and stays in Penship.
 
-Seven. That menu opens Open, Save, Save as, Export, and Contents, and the same options on a phone and on a wide window. Save writes the open file. If the note is still the private scratch file, or the open file cannot be written, Save asks the system for a place. Save as always asks, and the note becomes the file you pick. Export writes HTML from this buffer and does not replace the markdown you are editing. Contents lists the headings outside fences, up to sixty-four of them, and a tap moves the caret to that heading.
+Seven. That menu opens Open, Save, Save as, Export, and Contents, and the same options on a phone and on a wide window. Save writes the open file. If the note is still the private scratch file, or the open file cannot be written, Save asks the system for a place. Save as always asks, and the note becomes the file you pick. Export writes HTML from this buffer and does not replace the markdown you are editing. That copy keeps an underlined title, underscore emphasis, a reference link, an angle-bracket address, an indented code block, and an image's alt text and path. Contents lists the headings outside fences, up to sixty-four of them, and a tap moves the caret to that heading.
 
 Eight. Open with offers Penship for text and for the markdown names it knows. A share can hand over a file or a piece of text. A read-only open falls back to a private copy, so a file the system will not let you write is not quietly discarded. The edits of that session live in the copy. The original stays where the other app left it.
 
-Nine. Saving still writes the whole file. That is fine for this sample and wrong for a huge one. The bytes on disk are the bytes you typed. Nothing rewrites a heading, renumbers a list, or wraps a paragraph for you on the way out. A pause saves. A failed load does not replace the note that was already open, and it does not save an empty page over your file.
+Nine. A pause saves. Typing at the end appends those bytes. Deleting at the end shortens the file. An edit in the middle still replaces the file, so a crash cannot tear the note in half. Nothing rewrites a heading, renumbers a list, or wraps a paragraph for you on the way out. A failed load does not replace the note that was already open, and it does not save an empty page over your file.
 
 Ten. The word count sits on the Open row of the menu, so it is not painted across a sentence. A word is a run of letters, digits, or a non-ASCII byte. The hashes, stars, and pipes are not words. Heading jumps, task taps, and table Tab share work the page already did while it measured lines. Ctrl and up or down moves to the next heading. Tab on the last cell of a table adds a row. Shift and Tab moves back.
 
@@ -197,7 +209,7 @@ Twelve. Strong text uses a bold face when Download faces has brought one in. Unt
 
 Thirteen. An ordered item keeps the digits you typed. A hyphen, a plus, or a star becomes a square when you are not on the line. A task becomes a box you can tap, checked or open. The tap has to land and stay. A drag is a scroll or a selection, not a toggle. Nested items sit further right, one indent at a time. The number you typed is not rewritten when the items around it change.
 
-Fourteen. A link and an image hide the address until the caret is on that line. The words stay, in the link color. Nothing is fetched, and no picture is decoded. The alt text is the stand-in for the picture. Brackets and the address return on the caret line so you can edit them. The first tap on a link only moves the caret. A later tap on that same http or https address opens it. Any other address stays in the note.
+Fourteen. A link and an image hide the address until the caret is on that line. The words stay, in the link color. A picture file next to the note is drawn. A PNG or a JPEG from Wikimedia Commons is fetched once and kept. Any other address is not fetched. The alt text stands in when that file is missing. Brackets and the address return on the caret line so you can edit them. The first tap on a link only moves the caret. A later tap on that same http or https address opens it. Any other address stays in the note.
 
 Fifteen. Inline code hides its ticks off the caret line and keeps the code color. A fenced block opens as a whole, from the opener through the matching close, and the wash remains behind it. A tilde fence is the same kind of block as a backtick fence. The ticks stay visible while the caret is anywhere in that block.
 
@@ -217,7 +229,7 @@ Twenty-two. The ordinary mode is not a mode you enter. Open the note and the car
 
 ## A passage, so the page can move
 
-A note that only lists its own features is still a list. The rest of this file is prose, so the scroll has weight and the caret has lines to land on. It is about keeping a record on a phone, in the same markdown this editor paints. Nothing here is fetched. Nothing here is a picture. The words are the note.
+A note that only lists its own features is still a list. The rest of this file is prose, so the scroll has weight and the caret has lines to land on. It is about keeping a record on a phone, in the same markdown this editor paints. The ship above is fetched once from Wikimedia Commons and kept. The rest of this passage is words.
 
 You open the app on a train and the last paragraph is where you left it. The caret is in the middle of a sentence you did not finish. The line is source, so you can see the star you typed before the doors closed. The lines above are rendered. A heading is just the words, taller if it has one hash. A list is a column of squares. You do not need the marks to read them. You need the marks to change them, and the change is the line under your thumb.
 
@@ -233,7 +245,7 @@ A table is for the two columns that do not belong in a list. Name, and whether y
 
 Code is for the command you will forget. One pair of ticks for a word in a sentence. A fence for the three lines you want to keep together. The wash marks the fence even when the ticks are hidden. The fence opens as one block, from the opener through the close, so the ticks stay while you change any line inside it.
 
-A link shows its words, and the address waits on the caret line. The first tap puts the caret there. A later tap on that same http or https address opens it. An image is the same shape with an exclamation mark, and it is still words. The picture is later. The alt text is what this page can tell the truth about today.
+A link shows its words, and the address waits on the caret line. The first tap puts the caret there. A later tap on that same http or https address opens it. An image is the same shape with an exclamation mark. On its own line, the file is the picture. A PNG or a JPEG on Wikimedia Commons is fetched once. The alt text is what remains when the file is not there.
 
 Headings are how you get back. Contents lists them. Ctrl and down walks them when a keyboard with those keys is attached. A long note without headings is a scroll with no rungs. This passage has one heading, on purpose, so the stretch above can be left and found again. The title at the top of the file is a setext heading, a line of equals under the words, which is why it is not a row of hashes.
 
@@ -245,4 +257,4 @@ Saving is dull, which is what you want from it. The file is the buffer. Save wri
 
 If this passage is long enough, the top of the file is off the screen while you read this sentence. Drag down to return. The caret stays unless you tap. Tap a heading in Contents if you would rather jump. The word count, when you open the menu, includes the words of this passage and the words of the sections above. It does not include the marks. It is a count of the note, not of the syntax.
 
-What is still missing is stated once, up in Still ahead, and it can stay there. Pictures, math, and the other languages are not given a fake section here. This file grows when a mark starts working. Until then the page should be long enough to scroll, specific enough to test, and ordinary enough to read. That is the sample.
+What is still missing is stated once, up in Still ahead, and it can stay there. Math and the other languages are not given a fake section here. Pictures are drawn. This file grows when a mark starts working. Until then the page should be long enough to scroll, specific enough to test, and ordinary enough to read. That is the sample.

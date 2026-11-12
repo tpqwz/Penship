@@ -49,6 +49,11 @@ enum {
     PAGE_NIGHT_INK_B = 218
 };
 
+/* A decoded picture for an image mark. name is the path written in the note.
+   rgba is width * height * 4 bytes. The page keeps its own copy. 0 on success. */
+int page_set_picture(const char *name, const uint8_t *rgba, int w, int h);
+int page_has_picture(const char *name);
+
 /* Day palette is 0. Night palette is 1. */
 void page_set_theme(int theme);
 /* Current theme. which 0 is paper, 1 is the rule, 2 is the block. */

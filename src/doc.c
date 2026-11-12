@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "doc.h"
 
 #include "utf8.h"
@@ -6,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define DOC_UNDO_MAX 32
 #define DOC_UNDO_BYTES (1u << 16)
@@ -40,6 +43,10 @@ struct Doc {
     struct Edit undo[DOC_UNDO_MAX];
     size_t undo_n;
     size_t undo_bytes;
+    /* SIZE_MAX means the bytes match the last save of saved_path. */
+    size_t dirty_at;
+    size_t saved_len;
+    char saved_path[1024];
 };
 
 static void piece_clear(Doc *doc) {
@@ -123,6 +130,8 @@ Doc *doc_new(void) {
         return NULL;
     }
     doc->cap = 1;
+    doc->dirty_at = 0;
+    doc->saved_len = SIZE_MAX;
     return doc;
 }
 
@@ -340,6 +349,9 @@ static int splice(Doc *doc, size_t at, size_t cut, const char *in, size_t n) {
             memcpy(doc->bytes + at, in, n);
         }
         doc->bytes[new_len] = '\0';
+    }
+    if (doc->dirty_at > at) {
+        doc->dirty_at = at;
     }
     return 0;
 }
@@ -1864,6 +1876,9 @@ int doc_load_bytes(Doc *doc, const char *bytes, size_t n) {
     doc->caret = n;
     doc->anchor = n;
     undo_clear(doc);
+    doc->dirty_at = 0;
+    doc->saved_len = SIZE_MAX;
+    doc->saved_path[0] = '\0';
     return 0;
 }
 
@@ -1894,24 +1909,67 @@ int doc_load(Doc *doc, const char *path) {
     fclose(file);
     int rc = n == (size_t)size ? doc_load_bytes(doc, bytes, n) : -1;
     free(bytes);
+    if (rc == 0 && strlen(path) < sizeof doc->saved_path) {
+        memcpy(doc->saved_path, path, strlen(path) + 1);
+        doc->saved_len = doc->len;
+        doc->dirty_at = SIZE_MAX;
+    }
     return rc;
 }
 
-int doc_save(const Doc *doc, const char *path) {
+static int file_len(const char *path, size_t *out) {
+    FILE *file = fopen(path, "rb");
+    long size = 0;
+    if (file == NULL) {
+        return -1;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return -1;
+    }
+    size = ftell(file);
+    fclose(file);
+    if (size < 0) {
+        return -1;
+    }
+    *out = (size_t)size;
+    return 0;
+}
+
+static int same_save(const Doc *doc, const char *path) {
+    return doc->saved_path[0] != '\0' && strcmp(doc->saved_path, path) == 0 && doc->saved_len != SIZE_MAX;
+}
+
+static void remember_save(Doc *doc, const char *path) {
+    size_t n = strlen(path);
+    if (n >= sizeof doc->saved_path) {
+        doc->saved_path[0] = '\0';
+        doc->dirty_at = 0;
+        return;
+    }
+    memcpy(doc->saved_path, path, n + 1);
+    doc->saved_len = doc->len;
+    doc->dirty_at = SIZE_MAX;
+}
+
+static int save_full(Doc *doc, const char *path) {
     size_t path_len = strlen(path);
     char *tmp = malloc(path_len + 5);
+    FILE *file = NULL;
+    size_t n = 0;
+    int closed = 0;
     if (tmp == NULL) {
         return -1;
     }
     memcpy(tmp, path, path_len);
     memcpy(tmp + path_len, ".tmp", 5);
-    FILE *file = fopen(tmp, "wb");
+    file = fopen(tmp, "wb");
     if (file == NULL) {
         free(tmp);
         return -1;
     }
-    size_t n = fwrite(doc->bytes, 1, doc->len, file);
-    int closed = fclose(file);
+    n = fwrite(doc->bytes, 1, doc->len, file);
+    closed = fclose(file);
     if (n != doc->len || closed != 0) {
         remove(tmp);
         free(tmp);
@@ -1923,5 +1981,66 @@ int doc_save(const Doc *doc, const char *path) {
         return -1;
     }
     free(tmp);
+    return 0;
+}
+
+/* 0 appends the new tail. 1 shortens the file. The prefix is already the saved bytes. */
+static int save_end(Doc *doc, const char *path, int shorten) {
+    size_t have = 0;
+    FILE *file = NULL;
+    if (file_len(path, &have) != 0 || have != doc->saved_len) {
+        return -1;
+    }
+    file = fopen(path, "rb+");
+    if (file == NULL) {
+        return -1;
+    }
+    if (shorten) {
+        if (ftruncate(fileno(file), (off_t)doc->len) != 0) {
+            fclose(file);
+            return -1;
+        }
+    } else {
+        size_t n = doc->len - doc->saved_len;
+        size_t wrote = 0;
+        if (fseek(file, (long)doc->saved_len, SEEK_SET) != 0) {
+            fclose(file);
+            return -1;
+        }
+        wrote = fwrite(doc->bytes + doc->saved_len, 1, n, file);
+        if (wrote != n || fflush(file) != 0) {
+            fclose(file);
+            return -1;
+        }
+    }
+    if (fclose(file) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int doc_save(Doc *doc, const char *path) {
+    int append = 0;
+    int shorten = 0;
+    if (doc == NULL || path == NULL) {
+        return -1;
+    }
+    if (doc->dirty_at == SIZE_MAX && same_save(doc, path) && doc->saved_len == doc->len) {
+        return 0;
+    }
+    append = same_save(doc, path) && doc->dirty_at == doc->saved_len && doc->len > doc->saved_len;
+    shorten = same_save(doc, path) && doc->dirty_at == doc->len && doc->len < doc->saved_len;
+    if (append && save_end(doc, path, 0) == 0) {
+        remember_save(doc, path);
+        return 0;
+    }
+    if (shorten && save_end(doc, path, 1) == 0) {
+        remember_save(doc, path);
+        return 0;
+    }
+    if (save_full(doc, path) != 0) {
+        return -1;
+    }
+    remember_save(doc, path);
     return 0;
 }

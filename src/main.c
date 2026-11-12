@@ -1,6 +1,7 @@
 #include "chrome.h"
 #include "doc.h"
 #include "fontlist.h"
+#include "image.h"
 #include "html.h"
 #include "ime.h"
 #include "page.h"
@@ -307,6 +308,7 @@ static int start_gl(struct App *app) {
     return 1;
 }
 
+static void load_pictures(struct App *app, const char *text, size_t len);
 static void read_insets(struct App *app, int *top, int *bottom);
 static int font_scale_milli(struct App *app);
 static void hide_keyboard(struct App *app);
@@ -717,6 +719,7 @@ static void render(struct App *app) {
     }
     size_t len = 0;
     const char *text = doc_text(app->doc, &len);
+    load_pictures(app, text, len);
     /* Count before a settings frame, which paints an empty page and would report zero words. */
     page_draw(app->pixels, width, height, app->chrome.text_x, app->chrome.text_y, app->chrome.text_w,
               app->chrome.text_h, text, len, doc_caret(app->doc), doc_anchor(app->doc), app->font_px);
@@ -1005,6 +1008,13 @@ static void render(struct App *app) {
     glViewport(0, 0, width, height);
     glBindTexture(GL_TEXTURE_2D, app->texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, app->pixels);
+    {
+        int pr = 0;
+        int pg = 0;
+        int pb = 0;
+        page_ui_rgb(0, &pr, &pg, &pb);
+        glClearColor(pr / 255.f, pg / 255.f, pb / 255.f, 1.f);
+    }
     glClear(GL_COLOR_BUFFER_BIT);
     if (app->program != 0) {
         glUseProgram(app->program);
@@ -1023,12 +1033,14 @@ static int write_uri(struct App *app);
 static void pick_file(struct App *app, int create);
 static void save_prefs(struct App *app);
 static unsigned char *load_asset(AAssetManager *manager, const char *name, int *len);
+static void load_pictures(struct App *app, const char *text, size_t len);
 
 static volatile int g_reload;
 static volatile int g_font_pick;
 static volatile int g_faces;
 static volatile int g_lists;
 static volatile int g_catalog;
+static volatile int g_picture;
 static volatile int g_redraw;
 static volatile int g_back;
 static int g_keyboard_hold;
@@ -2017,6 +2029,13 @@ JNIEXPORT void JNICALL Java_penship_Pen_catalogFetched(JNIEnv *env, jclass cls, 
     (void)env;
     (void)cls;
     g_catalog = ok ? 1 : -1;
+    ime_wake();
+}
+
+JNIEXPORT void JNICALL Java_penship_Pen_pictureFetched(JNIEnv *env, jclass cls, jint ok) {
+    (void)env;
+    (void)cls;
+    g_picture = ok ? 1 : -1;
     ime_wake();
 }
 
@@ -3390,6 +3409,313 @@ static unsigned char *load_asset(AAssetManager *manager, const char *name, int *
     return bytes;
 }
 
+enum { PICTURE_NAME = 96, PICTURE_TRIED = 8, PICTURE_BYTES = 512 * 1024 };
+
+static int g_picture_busy;
+static char g_picture_url[PICTURE_NAME];
+static char g_picture_tried[PICTURE_TRIED][PICTURE_NAME];
+static int g_picture_tried_n;
+
+/* shortcut: only a Wikimedia Commons FilePath PNG or JPEG is fetched, once, and kept.
+   Any other web address stays as words. */
+static int commons_suffix(const char *url, size_t n) {
+    size_t i = 0;
+    static const char *suf[] = {".png", ".jpg", ".jpeg"};
+    for (i = 0; i < 3; i++) {
+        size_t m = strlen(suf[i]);
+        size_t k = 0;
+        if (n < m) {
+            continue;
+        }
+        for (k = 0; k < m; k++) {
+            unsigned char c = (unsigned char)url[n - m + k];
+            if (c >= 'A' && c <= 'Z') {
+                c = (unsigned char)(c - 'A' + 'a');
+            }
+            if (c != (unsigned char)suf[i][k]) {
+                break;
+            }
+        }
+        if (k == m) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int commons_png(const char *url) {
+    static const char prefix[] = "https://commons.wikimedia.org/wiki/Special:FilePath/";
+    size_t prefix_n = sizeof prefix - 1;
+    size_t n = 0;
+    size_t i = 0;
+    if (url == NULL) {
+        return 0;
+    }
+    n = strlen(url);
+    if (n < prefix_n + 5 || n >= PICTURE_NAME || memcmp(url, prefix, prefix_n) != 0 || strstr(url, "..") != NULL) {
+        return 0;
+    }
+    if (!commons_suffix(url, n)) {
+        return 0;
+    }
+    for (i = prefix_n; i < n; i++) {
+        unsigned char c = (unsigned char)url[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+            c == '.') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/* FNV-1a over ASCII. Pen.fnvPicture uses the same mix. */
+static unsigned picture_fnv(const char *s) {
+    unsigned h = 2166136261u;
+    for (; s != NULL && *s != '\0'; s++) {
+        h ^= (unsigned char)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int picture_was_tried(const char *url) {
+    int i = 0;
+    for (i = 0; i < g_picture_tried_n; i++) {
+        if (strcmp(g_picture_tried[i], url) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void picture_mark_tried(const char *url) {
+    size_t n = 0;
+    if (url == NULL || picture_was_tried(url) || g_picture_tried_n >= PICTURE_TRIED) {
+        return;
+    }
+    n = strlen(url);
+    if (n == 0 || n >= PICTURE_NAME) {
+        return;
+    }
+    memcpy(g_picture_tried[g_picture_tried_n], url, n + 1);
+    g_picture_tried_n++;
+}
+
+static void fetch_picture(struct App *app, const char *url) {
+    JNIEnv *env = NULL;
+    jclass pen = NULL;
+    jmethodID fetch = NULL;
+    jstring text = NULL;
+    env = jni_env(app);
+    if (env == NULL || app->android == NULL || app->android->activity == NULL) {
+        g_picture_busy = 0;
+        picture_mark_tried(url);
+        return;
+    }
+    pen = load_class(app, env, "penship.Pen");
+    if (pen == NULL) {
+        g_picture_busy = 0;
+        picture_mark_tried(url);
+        return;
+    }
+    fetch = (*env)->GetStaticMethodID(env, pen, "fetchPicture", "(Landroid/app/Activity;Ljava/lang/String;)V");
+    if (jni_ok(env) && fetch != NULL) {
+        text = (*env)->NewStringUTF(env, url);
+    }
+    if (jni_ok(env) && fetch != NULL && text != NULL) {
+        snprintf(g_picture_url, sizeof g_picture_url, "%s", url);
+        (*env)->CallStaticVoidMethod(env, pen, fetch, app->android->activity->clazz, text);
+        if (!jni_ok(env)) {
+            g_picture_busy = 0;
+            picture_mark_tried(url);
+        }
+    } else {
+        g_picture_busy = 0;
+        picture_mark_tried(url);
+    }
+    if (text != NULL) {
+        (*env)->DeleteLocalRef(env, text);
+    }
+    (*env)->DeleteLocalRef(env, pen);
+}
+
+/* 1 when the cached PNG is on the page. 0 when there is no cache. -1 when the file is unusable. */
+static int load_cached_picture(struct App *app, const char *url) {
+    char path[512];
+    char note_path[520];
+    char note[PICTURE_NAME];
+    unsigned char *bytes = NULL;
+    unsigned char *rgba = NULL;
+    FILE *file = NULL;
+    const char *dir = NULL;
+    long sz = 0;
+    int n = 0;
+    int w = 0;
+    int h = 0;
+    int wrote = 0;
+    size_t got = 0;
+    if (app->android == NULL || app->android->activity == NULL || app->android->activity->internalDataPath == NULL) {
+        return 0;
+    }
+    dir = app->android->activity->internalDataPath;
+    wrote = snprintf(path, sizeof path, "%s/pic/%08x.png", dir, picture_fnv(url));
+    if (wrote < 0 || (size_t)wrote >= sizeof path) {
+        return 0;
+    }
+    wrote = snprintf(note_path, sizeof note_path, "%s.url", path);
+    if (wrote < 0 || (size_t)wrote >= sizeof note_path) {
+        return 0;
+    }
+    file = fopen(note_path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+    got = fread(note, 1, sizeof note - 1, file);
+    fclose(file);
+    note[got] = '\0';
+    if (strcmp(note, url) != 0) {
+        return 0;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return -1;
+    }
+    sz = ftell(file);
+    if (sz < 8 || sz > PICTURE_BYTES || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return -1;
+    }
+    bytes = malloc((size_t)sz);
+    if (bytes == NULL || fread(bytes, 1, (size_t)sz, file) != (size_t)sz) {
+        free(bytes);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    n = (int)sz;
+    if (image_decode(bytes, n, &rgba, &w, &h) != 0 || page_set_picture(url, rgba, w, h) != 0) {
+        free(rgba);
+        free(bytes);
+        return -1;
+    }
+    free(rgba);
+    free(bytes);
+    return 1;
+}
+
+static void offer_picture(struct App *app, const char *url) {
+    char path[1200];
+    unsigned char *bytes = NULL;
+    int n = 0;
+    unsigned char *rgba = NULL;
+    int w = 0;
+    int h = 0;
+    const char *slash = NULL;
+    const char *base = NULL;
+    FILE *file = NULL;
+    long sz = 0;
+    if (url == NULL || url[0] == '\0' || strstr(url, "..") != NULL) {
+        return;
+    }
+    if (strstr(url, "://") != NULL) {
+        int cached = 0;
+        if (!commons_png(url) || page_has_picture(url)) {
+            return;
+        }
+        cached = load_cached_picture(app, url);
+        if (cached == 1 || cached < 0) {
+            if (cached < 0) {
+                picture_mark_tried(url);
+            }
+            return;
+        }
+        if (g_picture_busy || picture_was_tried(url)) {
+            return;
+        }
+        g_picture_busy = 1;
+        fetch_picture(app, url);
+        return;
+    }
+    if (page_has_picture(url)) {
+        return;
+    }
+    slash = strrchr(app->path, '/');
+    if (slash != NULL && url[0] != '/') {
+        int wrote = snprintf(path, sizeof path, "%.*s/%s", (int)(slash - app->path), app->path, url);
+        if (wrote > 0 && (size_t)wrote < sizeof path) {
+            file = fopen(path, "rb");
+        }
+    }
+    if (file != NULL) {
+        if (fseek(file, 0, SEEK_END) == 0) {
+            sz = ftell(file);
+        }
+        if (sz > 0 && sz < 4000000 && fseek(file, 0, SEEK_SET) == 0) {
+            bytes = malloc((size_t)sz);
+            if (bytes != NULL && fread(bytes, 1, (size_t)sz, file) == (size_t)sz) {
+                n = (int)sz;
+            } else {
+                free(bytes);
+                bytes = NULL;
+            }
+        }
+        fclose(file);
+    }
+    if (bytes == NULL && app->android != NULL && app->android->activity != NULL) {
+        base = strrchr(url, '/');
+        base = base == NULL ? url : base + 1;
+        bytes = load_asset(app->android->activity->assetManager, base, &n);
+    }
+    if (bytes != NULL && image_decode(bytes, n, &rgba, &w, &h) == 0) {
+        page_set_picture(url, rgba, w, h);
+    }
+    free(rgba);
+    free(bytes);
+}
+
+static void load_pictures(struct App *app, const char *text, size_t len) {
+    size_t i = 0;
+    if (app == NULL || text == NULL) {
+        return;
+    }
+    while (i + 4 < len) {
+        size_t bracket = 0;
+        size_t close = 0;
+        char url[96];
+        size_t n = 0;
+        if (text[i] != '!' || text[i + 1] != '[') {
+            i++;
+            continue;
+        }
+        bracket = i + 2;
+        while (bracket < len && text[bracket] != ']' && text[bracket] != '\n') {
+            bracket++;
+        }
+        if (bracket + 1 >= len || text[bracket] != ']' || text[bracket + 1] != '(') {
+            i++;
+            continue;
+        }
+        close = bracket + 2;
+        while (close < len && text[close] != ')' && text[close] != '\n' && text[close] != ' ') {
+            close++;
+        }
+        if (close < len && text[close] == ')' && close > bracket + 2) {
+            n = close - (bracket + 2);
+            if (n < sizeof url) {
+                memcpy(url, text + bracket + 2, n);
+                url[n] = '\0';
+                offer_picture(app, url);
+            }
+        }
+        i = close + 1;
+    }
+}
+
 enum { FONT_MAX = 8 * 1024 * 1024 };
 
 /* 0 when the file is a TrueType the painter can read. The previous face stays put on failure. */
@@ -4256,6 +4582,15 @@ void android_main(struct android_app *android) {
                     load_font_list(&app);
                 } else if (app.list_n == 0) {
                     snprintf(app.list_banner, sizeof app.list_banner, "No faces");
+                }
+                render(&app);
+            }
+            if (g_picture != 0) {
+                int ok = g_picture > 0;
+                g_picture = 0;
+                g_picture_busy = 0;
+                if (!ok) {
+                    picture_mark_tried(g_picture_url);
                 }
                 render(&app);
             }

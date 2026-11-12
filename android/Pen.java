@@ -47,6 +47,8 @@ public class Pen extends android.app.NativeActivity {
 
     private static native void catalogFetched(int ok);
 
+    private static native void pictureFetched(int ok);
+
     /** Open is 0. Save-as is 1. Export is 2. A font file is 3. */
     public static void pick(Activity activity, int create) {
         activity.runOnUiThread(new Runnable() {
@@ -306,7 +308,16 @@ public class Pen extends android.app.NativeActivity {
         });
     }
 
-    private static boolean hostAllowed(String host) {
+    private static final int HOST_FACE = 0;
+    private static final int HOST_PICTURE = 1;
+
+    private static boolean hostAllowed(String host, int kind) {
+        if (host == null) {
+            return false;
+        }
+        if (kind == HOST_PICTURE) {
+            return "commons.wikimedia.org".equals(host) || "upload.wikimedia.org".equals(host);
+        }
         return "github.com".equals(host) || "www.github.com".equals(host) || "raw.githubusercontent.com".equals(host)
                 || "objects.githubusercontent.com".equals(host) || "fonts.gstatic.com".equals(host);
     }
@@ -331,7 +342,7 @@ public class Pen extends android.app.NativeActivity {
             new java.io.File(pack.getPath() + ".url").delete();
             return true;
         }
-        if (!resumeToFile(activity, FACE_PACK, pack, 8 * 1024 * 1024)) {
+        if (!resumeToFile(activity, FACE_PACK, pack, 8 * 1024 * 1024, HOST_FACE)) {
             return false;
         }
         if (!gzipMagic(pack)) {
@@ -480,14 +491,15 @@ public class Pen extends android.app.NativeActivity {
     }
 
     /** 1 when dest holds the whole body. 0 when a short read was kept for the next try. -1 when the part must be dropped. */
-    private static int pull(android.content.Context context, String urlString, java.io.File dest, long have, int max) {
+    private static int pull(android.content.Context context, String urlString, java.io.File dest, long have, int max,
+            int kind) {
         java.net.HttpURLConnection conn = null;
         java.io.InputStream in = null;
         java.io.OutputStream out = null;
         try {
             java.net.URL url = new java.net.URL(urlString);
             for (int hop = 0; hop < 5; hop++) {
-                if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null || !hostAllowed(url.getHost())) {
+                if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null || !hostAllowed(url.getHost(), kind)) {
                     return -1;
                 }
                 int port = url.getPort();
@@ -505,7 +517,8 @@ public class Pen extends android.app.NativeActivity {
                         trial.setInstanceFollowRedirects(true);
                         trial.setConnectTimeout(15000);
                         trial.setReadTimeout(60000);
-                        trial.setRequestProperty("User-Agent", "penship/0.1");
+                        trial.setRequestProperty("User-Agent", kind == HOST_PICTURE
+                                ? "penship/0.1 (https://github.com/tpqwz/Penship)" : "penship/0.1");
                         trial.setRequestProperty("Accept-Encoding", "identity");
                         trial.setRequestProperty("Connection", "close");
                         if (have > 0) {
@@ -529,7 +542,7 @@ public class Pen extends android.app.NativeActivity {
                 int code = conn.getResponseCode();
                 java.net.URL landed = conn.getURL();
                 String landedHost = landed == null ? null : landed.getHost();
-                if (landedHost != null && !ipLiteral(landedHost) && !hostAllowed(landedHost)) {
+                if (landedHost != null && !ipLiteral(landedHost) && !hostAllowed(landedHost, kind)) {
                     android.util.Log.i("penship", "face host " + landedHost);
                     return -1;
                 }
@@ -650,7 +663,8 @@ public class Pen extends android.app.NativeActivity {
         }
     }
 
-    private static boolean resumeToFile(android.content.Context context, String urlString, java.io.File dest, int max) {
+    private static boolean resumeToFile(android.content.Context context, String urlString, java.io.File dest, int max,
+            int kind) {
         java.io.File note = new java.io.File(dest.getPath() + ".url");
         String saved = readText(note);
         if (!urlString.equals(saved)) {
@@ -666,7 +680,7 @@ public class Pen extends android.app.NativeActivity {
                 dest.delete();
                 have = 0;
             }
-            int result = pull(context, urlString, dest, have, max);
+            int result = pull(context, urlString, dest, have, max, kind);
             if (result == 1) {
                 return dest.isFile() && dest.length() > 0;
             }
@@ -676,6 +690,120 @@ public class Pen extends android.app.NativeActivity {
             dest.delete();
         }
         return false;
+    }
+
+    private static boolean fetchingPicture;
+
+    /** A Commons FilePath PNG or JPEG, one file name, no query. The native check uses the same rule. */
+    private static boolean commonsPng(String url) {
+        String prefix = "https://commons.wikimedia.org/wiki/Special:FilePath/";
+        String lower;
+        if (url == null || url.length() < prefix.length() + 5 || url.length() >= 96 || !url.startsWith(prefix)
+                || url.indexOf("..") >= 0) {
+            return false;
+        }
+        lower = url.substring(url.length() - 5).toLowerCase(java.util.Locale.US);
+        if (!lower.endsWith(".png") && !lower.endsWith(".jpg") && !url.toLowerCase(java.util.Locale.US).endsWith(".jpeg")) {
+            return false;
+        }
+        for (int i = prefix.length(); i < url.length(); i++) {
+            char c = url.charAt(i);
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+                    || c == '.') {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /** FNV-1a over ASCII. The native cache name uses the same mix. */
+    private static int fnvPicture(String s) {
+        int h = 0x811c9dc5;
+        for (int i = 0; i < s.length(); i++) {
+            h ^= s.charAt(i);
+            h *= 16777619;
+        }
+        return h;
+    }
+
+    private static boolean pngMagic(java.io.File file) {
+        java.io.InputStream in = null;
+        if (file == null || !file.isFile() || file.length() < 8 || file.length() > 512 * 1024) {
+            return false;
+        }
+        try {
+            in = new java.io.FileInputStream(file);
+            byte[] sig = new byte[8];
+            int n = readFull(in, sig, 8);
+            in.close();
+            in = null;
+            if (n == 8 && (sig[0] & 0xff) == 137 && sig[1] == 80 && sig[2] == 78 && sig[3] == 71 && sig[4] == 13
+                    && sig[5] == 10 && sig[6] == 26 && sig[7] == 10) {
+                return true;
+            }
+            return n >= 3 && (sig[0] & 0xff) == 0xff && (sig[1] & 0xff) == 0xd8 && (sig[2] & 0xff) == 0xff;
+        } catch (java.io.IOException ignored) {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (java.io.IOException closeIgnored) {
+                }
+            }
+            return false;
+        }
+    }
+
+    private static boolean downloadPicture(Activity activity, String url) {
+        java.io.File dir;
+        java.io.File dest;
+        java.io.File note;
+        if (!commonsPng(url)) {
+            return false;
+        }
+        dir = new java.io.File(activity.getFilesDir(), "pic");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return false;
+        }
+        dest = new java.io.File(dir, String.format(java.util.Locale.US, "%08x.png", fnvPicture(url)));
+        note = new java.io.File(dest.getPath() + ".url");
+        if (url.equals(readText(note)) && pngMagic(dest)) {
+            return true;
+        }
+        if (!resumeToFile(activity, url, dest, 512 * 1024, HOST_PICTURE) || !pngMagic(dest)) {
+            dest.delete();
+            note.delete();
+            android.util.Log.i("penship", "picture failed");
+            return false;
+        }
+        return true;
+    }
+
+    /** Fetch one Commons PNG or JPEG into app storage. Other addresses are refused. */
+    public static void fetchPicture(Activity activity, String url) {
+        final Activity host = activity;
+        final String target = url;
+        if (fetchingPicture || activity == null || !commonsPng(url)) {
+            return;
+        }
+        fetchingPicture = true;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean ok = false;
+                        try {
+                            ok = downloadPicture(host, target);
+                        } finally {
+                            fetchingPicture = false;
+                            pictureFetched(ok ? 1 : 0);
+                        }
+                    }
+                }, "penship-picture").start();
+            }
+        });
     }
 
     private static String readText(java.io.File file) {
@@ -1196,7 +1324,7 @@ public class Pen extends android.app.NativeActivity {
         if (url == null) {
             return false;
         }
-        if (!resumeToFile(activity, url, part, FONT_MAX) || !ttfMagic(part)) {
+        if (!resumeToFile(activity, url, part, FONT_MAX, HOST_FACE) || !ttfMagic(part)) {
             if (part.isFile() && part.length() > 12 && !ttfMagic(part)) {
                 part.delete();
                 new java.io.File(part.getPath() + ".url").delete();
