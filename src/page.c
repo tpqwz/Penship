@@ -4838,36 +4838,6 @@ static void stroke_box(uint8_t *px, int width, int height, float ox, float oy, f
     stroke_poly(px, width, height, ox, oy, side, xy, 5, thick, r, g, b);
 }
 
-static float sdf_rect(float x, float y, float x0, float y0, float x1, float y1) {
-    float dx = fabsf(x - (x0 + x1) * 0.5f) - (x1 - x0) * 0.5f;
-    float dy = fabsf(y - (y0 + y1) * 0.5f) - (y1 - y0) * 0.5f;
-    float ax = dx > 0.f ? dx : 0.f;
-    float ay = dy > 0.f ? dy : 0.f;
-    float outside = sqrtf(ax * ax + ay * ay);
-    float inside = dx > dy ? dx : dy;
-    if (inside > 0.f) {
-        inside = 0.f;
-    }
-    return outside + inside;
-}
-
-static float sdf_ellipse(float x, float y, float cx, float cy, float rx, float ry) {
-    float nx = (x - cx) / rx;
-    float ny = (y - cy) / ry;
-    float len = sqrtf(nx * nx + ny * ny);
-    float scale = rx < ry ? rx : ry;
-    return (len - 1.f) * scale;
-}
-
-static float ring(float outer, float inner) {
-    float hole = -inner;
-    return outer > hole ? outer : hole;
-}
-
-static float nearer(float a, float b) {
-    return a < b ? a : b;
-}
-
 static float dist_seg(float x, float y, float x0, float y0, float x1, float y1) {
     float dx = x1 - x0;
     float dy = y1 - y0;
@@ -4887,41 +4857,109 @@ static float dist_seg(float x, float y, float x0, float y0, float x1, float y1) 
     return sqrtf(qx * qx + qy * qy);
 }
 
-/* One coverage sample per pixel, then one blend. Overlapping strokes were darkening the joints. */
+static void cover_path(float u, float v, const float *uv, int n, float half, float *best) {
+    for (int i = 0; i + 1 < n; i++) {
+        float ds = dist_seg(u, v, uv[i * 2], uv[i * 2 + 1], uv[(i + 1) * 2], uv[(i + 1) * 2 + 1]) - half;
+        if (ds < *best) {
+            *best = ds;
+        }
+    }
+}
+
+/* Points of an elliptical arc. y grows downward, so a positive angle runs clockwise on the page. */
+static int arc_pts(float *uv, int cap, float cx, float cy, float rx, float ry, float a0, float a1, int steps) {
+    if (steps < 2) {
+        steps = 2;
+    }
+    if (steps > cap) {
+        steps = cap;
+    }
+    for (int i = 0; i < steps; i++) {
+        float t = a0 + (a1 - a0) * (float)i / (float)(steps - 1);
+        uv[i * 2] = cx + cosf(t) * rx;
+        uv[i * 2 + 1] = cy + sinf(t) * ry;
+    }
+    return steps;
+}
+
+/* Open Catmull-Rom through the guides, so a short S does not show its corners. */
+static int smooth_open(const float *in, int n, float *out, int cap) {
+    int w = 0;
+    if (n < 2 || cap < 2) {
+        return 0;
+    }
+    for (int i = 0; i + 1 < n; i++) {
+        int i0 = i > 0 ? i - 1 : i;
+        int i3 = i + 2 < n ? i + 2 : i + 1;
+        for (int s = 0; s < 4; s++) {
+            float t = (float)s / 4.f;
+            float t2 = t * t;
+            float t3 = t2 * t;
+            if (w >= cap) {
+                return w;
+            }
+            for (int k = 0; k < 2; k++) {
+                float p0 = in[i0 * 2 + k];
+                float p1 = in[i * 2 + k];
+                float p2 = in[(i + 1) * 2 + k];
+                float p3 = in[i3 * 2 + k];
+                out[w * 2 + k] = 0.5f * ((2.f * p1) + (-p0 + p2) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t2 +
+                                         (-p0 + 3.f * p1 - 3.f * p2 + p3) * t3);
+            }
+            w++;
+        }
+    }
+    if (w < cap) {
+        out[w * 2] = in[(n - 1) * 2];
+        out[w * 2 + 1] = in[(n - 1) * 2 + 1];
+        w++;
+    }
+    return w;
+}
+
+/* One coverage sample per pixel, then one blend. Overlapping strokes were darkening the joints.
+   Bold is a heavier stroke than italic. The strike is a line through an S, not a second outline. */
 static void paint_letter(uint8_t *px, int width, int height, int x0, int y0, int side, int tool, int r, int g, int b) {
     if (side < 1 || side > 160) {
         return;
     }
     unsigned char mask[160 * 160];
+    float up[32];
+    float low[32];
+    float curve[96];
+    int nu = 0;
+    int nl = 0;
+    int nc = 0;
+    static const float bstem[] = {0.32f, 0.16f, 0.32f, 0.84f};
+    static const float istem[] = {0.62f, 0.22f, 0.40f, 0.78f};
+    static const float itop[] = {0.46f, 0.22f, 0.76f, 0.22f};
+    static const float ibot[] = {0.26f, 0.78f, 0.56f, 0.78f};
+    static const float guides[] = {0.72f, 0.24f, 0.56f, 0.14f, 0.38f, 0.16f, 0.26f, 0.30f, 0.32f, 0.42f, 0.50f, 0.50f,
+                                   0.68f, 0.58f, 0.76f, 0.70f, 0.70f, 0.82f, 0.52f, 0.88f, 0.32f, 0.80f};
+    static const float bar[] = {0.14f, 0.50f, 0.86f, 0.50f};
     memset(mask, 0, (size_t)side * (size_t)side);
+    if (tool == 0) {
+        nu = arc_pts(up, 16, 0.32f, 0.34f, 0.36f, 0.16f, -1.45f, 1.45f, 14);
+        nl = arc_pts(low, 16, 0.32f, 0.66f, 0.42f, 0.18f, -1.50f, 1.50f, 16);
+    } else if (tool == 2) {
+        nc = smooth_open(guides, 11, curve, 48);
+    }
     for (int y = 0; y < side; y++) {
         for (int x = 0; x < side; x++) {
             float u = ((float)x + 0.5f) / (float)side;
             float v = ((float)y + 0.5f) / (float)side;
-            float d = 1.f;
+            float d = 4.f;
             if (tool == 0) {
-                float stem = sdf_rect(u, v, 0.20f, 0.12f, 0.42f, 0.88f);
-                float up = ring(sdf_ellipse(u, v, 0.48f, 0.34f, 0.30f, 0.22f), sdf_ellipse(u, v, 0.48f, 0.34f, 0.14f, 0.09f));
-                float low = ring(sdf_ellipse(u, v, 0.50f, 0.68f, 0.32f, 0.22f), sdf_ellipse(u, v, 0.50f, 0.68f, 0.15f, 0.09f));
-                d = nearer(stem, nearer(up, low));
+                cover_path(u, v, bstem, 2, 0.078f, &d);
+                cover_path(u, v, up, nu, 0.062f, &d);
+                cover_path(u, v, low, nl, 0.062f, &d);
             } else if (tool == 1) {
-                float shifted = u - (0.80f - v) * 0.26f;
-                float stem = sdf_rect(shifted, v, 0.30f, 0.18f, 0.46f, 0.82f);
-                float top = sdf_rect(u, v, 0.40f, 0.12f, 0.78f, 0.22f);
-                float bot = sdf_rect(u, v, 0.18f, 0.78f, 0.56f, 0.88f);
-                d = nearer(stem, nearer(top, bot));
+                cover_path(u, v, istem, 2, 0.058f, &d);
+                cover_path(u, v, itop, 2, 0.058f, &d);
+                cover_path(u, v, ibot, 2, 0.058f, &d);
             } else {
-                static const float path[] = {0.70f, 0.16f, 0.40f, 0.12f, 0.26f, 0.26f, 0.38f, 0.42f,
-                                             0.64f, 0.52f, 0.76f, 0.68f, 0.58f, 0.88f, 0.28f, 0.82f};
-                float best = 4.f;
-                for (int i = 0; i < 7; i++) {
-                    float ds = dist_seg(u, v, path[i * 2], path[i * 2 + 1], path[i * 2 + 2], path[i * 2 + 3]);
-                    if (ds < best) {
-                        best = ds;
-                    }
-                }
-                float cut = dist_seg(u, v, 0.08f, 0.50f, 0.92f, 0.50f);
-                d = nearer(best - 0.075f, cut - 0.045f);
+                cover_path(u, v, curve, nc, 0.055f, &d);
+                cover_path(u, v, bar, 2, 0.028f, &d);
             }
             float cover = 0.5f - d * (float)side;
             if (cover < 0.f) {

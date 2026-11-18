@@ -20,11 +20,10 @@ static int paeth(int a, int b, int c) {
     return pb <= pc ? b : c;
 }
 
-static int unfilter(unsigned char *raw, int width, int height, int ch) {
-    int stride = width * ch;
+static int unfilter(unsigned char *raw, int height, int stride, int bpp) {
     unsigned char *prev = calloc((size_t)stride, 1);
     unsigned char *row = raw;
-    if (prev == NULL || stride < 1) {
+    if (prev == NULL || stride < 1 || bpp < 1 || bpp > stride) {
         free(prev);
         return -1;
     }
@@ -36,9 +35,9 @@ static int unfilter(unsigned char *raw, int width, int height, int ch) {
             return -1;
         }
         for (int i = 0; i < stride; i++) {
-            int left = i >= ch ? pix[i - ch] : 0;
+            int left = i >= bpp ? pix[i - bpp] : 0;
             int up = prev[i];
-            int ul = i >= ch ? prev[i - ch] : 0;
+            int ul = i >= bpp ? prev[i - bpp] : 0;
             int v = pix[i];
             if (filter == 1) {
                 v += left;
@@ -763,6 +762,9 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
     return 0;
 }
 
+static int sample_bits(const unsigned char *row, int x, int depth);
+static int scale_depth(int v, int depth);
+
 int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w, int *h) {
     static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
     unsigned char *idat = NULL;
@@ -772,8 +774,23 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     unsigned long height = 0;
     int depth = 0;
     int color = 0;
-    int ch = 0;
+    int samples = 0;
+    int bits = 0;
+    int filter_bpp = 0;
+    int stride = 0;
     int at = 8;
+    int saw = 0;
+    int npal = 0;
+    int have_gray = 0;
+    int gray_key = 0;
+    int have_rgb = 0;
+    int key_r = 0;
+    int key_g = 0;
+    int key_b = 0;
+    unsigned char pal_r[256];
+    unsigned char pal_g[256];
+    unsigned char pal_b[256];
+    unsigned char pal_a[256];
     z_stream z;
     unsigned char *raw = NULL;
     unsigned char *out = NULL;
@@ -810,7 +827,65 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
             height = be32(data + 4);
             depth = data[8];
             color = data[9];
-            if (data[12] != 0 || width == 0 || height == 0 || width > 4096 || height > 4096) {
+            if (data[10] != 0 || data[11] != 0 || data[12] != 0 || width == 0 || height == 0 || width > 4096 ||
+                height > 4096) {
+                free(idat);
+                return -1;
+            }
+            saw = 1;
+        } else if (memcmp(type, "PLTE", 4) == 0) {
+            int i = 0;
+            if (!saw || npal != 0 || (color != 2 && color != 3 && color != 6) || len == 0 || len > 768 ||
+                len % 3 != 0) {
+                free(idat);
+                return -1;
+            }
+            if (color == 3) {
+                npal = (int)(len / 3);
+                for (i = 0; i < npal; i++) {
+                    pal_r[i] = data[i * 3];
+                    pal_g[i] = data[i * 3 + 1];
+                    pal_b[i] = data[i * 3 + 2];
+                    pal_a[i] = 255;
+                }
+            }
+        } else if (memcmp(type, "tRNS", 4) == 0) {
+            unsigned long i = 0;
+            if (!saw) {
+                free(idat);
+                return -1;
+            }
+            if (color == 3) {
+                if (npal == 0 || len > (unsigned long)npal) {
+                    free(idat);
+                    return -1;
+                }
+                for (i = 0; i < len; i++) {
+                    pal_a[i] = data[i];
+                }
+            } else if (color == 0) {
+                int key = 0;
+                if (have_gray || len < 2) {
+                    free(idat);
+                    return -1;
+                }
+                key = (data[0] << 8) | data[1];
+                if (depth >= 1 && depth <= 8 && key < (1 << depth)) {
+                    gray_key = key;
+                    have_gray = 1;
+                }
+            } else if (color == 2) {
+                if (have_rgb || len < 6) {
+                    free(idat);
+                    return -1;
+                }
+                if (data[0] == 0 && data[2] == 0 && data[4] == 0) {
+                    key_r = data[1];
+                    key_g = data[3];
+                    key_b = data[5];
+                    have_rgb = 1;
+                }
+            } else {
                 free(idat);
                 return -1;
             }
@@ -840,16 +915,41 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
         }
         at += 12 + (int)len;
     }
-    if (depth != 8 || (color != 2 && color != 6) || idat == NULL || width == 0 || height == 0) {
+    /* shortcut: 16-bit samples and Adam7 interlacing are refused. */
+    if (color == 0 || color == 3) {
+        samples = 1;
+    } else if (color == 2) {
+        samples = 3;
+    } else if (color == 4) {
+        samples = 2;
+    } else if (color == 6) {
+        samples = 4;
+    }
+    if (samples == 0 || idat == NULL || width == 0 || height == 0 || (color == 3 && npal < 1)) {
         free(idat);
         return -1;
     }
-    ch = color == 6 ? 4 : 3;
-    if (width > (4096u * 4u) / (unsigned)ch) {
+    if (color == 2 || color == 4 || color == 6) {
+        if (depth != 8) {
+            free(idat);
+            return -1;
+        }
+    } else if (depth != 1 && depth != 2 && depth != 4 && depth != 8) {
         free(idat);
         return -1;
     }
-    raw_n = (uLongf)((width * (unsigned)ch + 1) * height);
+    bits = depth * samples;
+    filter_bpp = (bits + 7) / 8;
+    if (filter_bpp < 1 || width > (1u << 20) / (unsigned)bits) {
+        free(idat);
+        return -1;
+    }
+    stride = ((int)width * bits + 7) / 8;
+    if (stride < 1 || height > (1u << 28) / (unsigned)(stride + 1)) {
+        free(idat);
+        return -1;
+    }
+    raw_n = (uLongf)((stride + 1) * (int)height);
     raw = malloc((size_t)raw_n);
     if (raw == NULL) {
         free(idat);
@@ -865,7 +965,7 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     z.avail_in = (uInt)idat_n;
     z.next_out = raw;
     z.avail_out = (uInt)raw_n;
-    if (inflate(&z, Z_FINISH) != Z_STREAM_END || unfilter(raw, (int)width, (int)height, ch) != 0) {
+    if (inflate(&z, Z_FINISH) != Z_STREAM_END || unfilter(raw, (int)height, stride, filter_bpp) != 0) {
         inflateEnd(&z);
         free(idat);
         free(raw);
@@ -878,18 +978,57 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
         free(raw);
         return -1;
     }
-    {
-        int stride = (int)width * ch;
-        for (unsigned long y = 0; y < height; y++) {
-            unsigned char *pix = raw + y * (size_t)(stride + 1) + 1;
-            for (unsigned long x = 0; x < width; x++) {
-                unsigned char *d = out + (y * width + x) * 4;
-                unsigned char *s = pix + x * (unsigned)ch;
-                d[0] = s[0];
-                d[1] = s[1];
-                d[2] = s[2];
-                d[3] = ch == 4 ? s[3] : 255;
+    for (unsigned long y = 0; y < height; y++) {
+        unsigned char *pix = raw + y * (size_t)(stride + 1) + 1;
+        for (unsigned long x = 0; x < width; x++) {
+            unsigned char *d = out + (y * width + x) * 4;
+            int r = 0;
+            int g = 0;
+            int b = 0;
+            int a = 255;
+            if (color == 0) {
+                int s = sample_bits(pix, (int)x, depth);
+                if (have_gray && s == gray_key) {
+                    a = 0;
+                }
+                g = scale_depth(s, depth);
+                r = g;
+                b = g;
+            } else if (color == 4) {
+                g = pix[x * 2];
+                a = pix[x * 2 + 1];
+                r = g;
+                b = g;
+            } else if (color == 3) {
+                int idx = sample_bits(pix, (int)x, depth);
+                if (idx < 0 || idx >= npal) {
+                    free(out);
+                    free(raw);
+                    return -1;
+                }
+                r = pal_r[idx];
+                g = pal_g[idx];
+                b = pal_b[idx];
+                a = pal_a[idx];
+            } else if (color == 2) {
+                unsigned char *s = pix + x * 3;
+                r = s[0];
+                g = s[1];
+                b = s[2];
+                if (have_rgb && r == key_r && g == key_g && b == key_b) {
+                    a = 0;
+                }
+            } else {
+                unsigned char *s = pix + x * 4;
+                r = s[0];
+                g = s[1];
+                b = s[2];
+                a = s[3];
             }
+            d[0] = (unsigned char)r;
+            d[1] = (unsigned char)g;
+            d[2] = (unsigned char)b;
+            d[3] = (unsigned char)a;
         }
     }
     free(raw);
@@ -897,4 +1036,21 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     *w = (int)width;
     *h = (int)height;
     return 0;
+}
+
+static int sample_bits(const unsigned char *row, int x, int depth) {
+    int bit = x * depth;
+    int shift = 7 - (bit & 7) - (depth - 1);
+    if (row == NULL || x < 0 || depth < 1 || depth > 8 || shift < 0) {
+        return 0;
+    }
+    return (row[bit >> 3] >> shift) & ((1 << depth) - 1);
+}
+
+static int scale_depth(int v, int depth) {
+    int maxv = (1 << depth) - 1;
+    if (depth >= 8 || maxv <= 0) {
+        return v;
+    }
+    return v * 255 / maxv;
 }

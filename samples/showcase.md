@@ -173,7 +173,7 @@ Until then, this note grows in place. The next feature appends a section rather 
 
 ## Pictures
 
-An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
+An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. A grayscale or palette PNG is drawn the same way. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
 
 ![the ship Endeavour](https://commons.wikimedia.org/wiki/Special:FilePath/Endeavour.png)
 

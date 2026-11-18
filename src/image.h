@@ -3,7 +3,8 @@
 
 #include <stddef.h>
 
-/* Decode an 8-bit PNG or a baseline JPEG into tightly packed RGBA. *rgba is malloc'd. 0 on success. */
+/* Decode a PNG or a baseline JPEG into tightly packed RGBA. *rgba is malloc'd. 0 on success.
+   PNG may be gray, gray with alpha, palette, or color. 16-bit and interlaced PNG are refused. */
 int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w, int *h);
 
 #endif

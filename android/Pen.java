@@ -518,7 +518,7 @@ public class Pen extends android.app.NativeActivity {
                         trial.setConnectTimeout(15000);
                         trial.setReadTimeout(60000);
                         trial.setRequestProperty("User-Agent", kind == HOST_PICTURE
-                                ? "penship/0.1 (https://github.com/tpqwz/Penship)" : "penship/0.1");
+                                ? "penship/0.2 (https://github.com/tpqwz/Penship)" : "penship/0.2");
                         trial.setRequestProperty("Accept-Encoding", "identity");
                         trial.setRequestProperty("Connection", "close");
                         if (have > 0) {
@@ -1083,7 +1083,7 @@ public class Pen extends android.app.NativeActivity {
                 conn.setInstanceFollowRedirects(false);
                 conn.setConnectTimeout(8000);
                 conn.setReadTimeout(15000);
-                conn.setRequestProperty("User-Agent", "penship/0.1");
+                conn.setRequestProperty("User-Agent", "penship/0.2");
                 int code = conn.getResponseCode();
                 if (code >= 300 && code < 400) {
                     String loc = conn.getHeaderField("Location");
