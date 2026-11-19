@@ -57,7 +57,8 @@ static int unfilter(unsigned char *raw, int height, int stride, int bpp) {
     return 0;
 }
 
-/* shortcut: arithmetic and CMYK JPEG are refused. Three components are read as YCbCr.
+/* Three components are read as YCbCr. Four components are CMYK, or YCCK when the Adobe
+   marker says so. Lossless and differential JPEG are refused.
    A progressive file keeps one coefficient grid per component and fills it scan by scan. */
 static const unsigned char k_zigzag[64] = {0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33, 40, 48,
                                             41, 34, 27, 20, 13, 6,  7,  14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23,
@@ -117,19 +118,33 @@ struct Jpeg {
     int al;
     int eob_run;
     int scan_n;
-    int scan_comp[3];
-    struct Comp comp[3];
+    int scan_comp[4];
+    struct Comp comp[4];
     unsigned char quant[4][64];
     int quant_ok[4];
     struct Huff dc[4];
     struct Huff ac[4];
     int dc_ok[4];
     int ac_ok[4];
+    int arith;
+    int unread;
+    unsigned span;
+    unsigned code;
+    int bitct;
+    int adobe;
+    int saw_adobe;
+    int dc_L[4];
+    int dc_U[4];
+    int ac_K[4];
+    int dc_ctx[4];
+    unsigned char fixed_bin;
+    unsigned char dc_stat[4][64];
+    unsigned char ac_stat[4][256];
 };
 
 static void jpeg_clear(struct Jpeg *j) {
     int i = 0;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 4; i++) {
         free(j->comp[i].plane);
         free(j->comp[i].coef);
         j->comp[i].plane = NULL;
@@ -258,7 +273,10 @@ static int read_restart(struct Jpeg *j, int which) {
     int c = 0;
     j->nbits = 0;
     j->acc = 0;
-    if (next_byte(j, &c) != 0) {
+    if (j->unread >= 0) {
+        c = j->unread;
+        j->unread = -1;
+    } else if (next_byte(j, &c) != 0) {
         return -1;
     }
     while (c == 0xff) {
@@ -309,7 +327,684 @@ static void idct8(const int *coef, unsigned char *dst) {
     }
 }
 
+static int put_mag(short *dst, int mag);
+static int shl_coef(int mag, int al);
+
+struct Qe {
+    unsigned short qe;
+    unsigned char nlps;
+    unsigned char nmps;
+    unsigned char sw;
+};
+
+/* Table D.3, plus one fixed bin that stays at probability 1/2 for sign bits. */
+static const struct Qe k_qe[114] = {
+    {0x5a1d, 1, 1, 1},
+    {0x2586, 14, 2, 0},
+    {0x1114, 16, 3, 0},
+    {0x080b, 18, 4, 0},
+    {0x03d8, 20, 5, 0},
+    {0x01da, 23, 6, 0},
+    {0x00e5, 25, 7, 0},
+    {0x006f, 28, 8, 0},
+    {0x0036, 30, 9, 0},
+    {0x001a, 33, 10, 0},
+    {0x000d, 35, 11, 0},
+    {0x0006, 9, 12, 0},
+    {0x0003, 10, 13, 0},
+    {0x0001, 12, 13, 0},
+    {0x5a7f, 15, 15, 1},
+    {0x3f25, 36, 16, 0},
+    {0x2cf2, 38, 17, 0},
+    {0x207c, 39, 18, 0},
+    {0x17b9, 40, 19, 0},
+    {0x1182, 42, 20, 0},
+    {0x0cef, 43, 21, 0},
+    {0x09a1, 45, 22, 0},
+    {0x072f, 46, 23, 0},
+    {0x055c, 48, 24, 0},
+    {0x0406, 49, 25, 0},
+    {0x0303, 51, 26, 0},
+    {0x0240, 52, 27, 0},
+    {0x01b1, 54, 28, 0},
+    {0x0144, 56, 29, 0},
+    {0x00f5, 57, 30, 0},
+    {0x00b7, 59, 31, 0},
+    {0x008a, 60, 32, 0},
+    {0x0068, 62, 33, 0},
+    {0x004e, 63, 34, 0},
+    {0x003b, 32, 35, 0},
+    {0x002c, 33, 9, 0},
+    {0x5ae1, 37, 37, 1},
+    {0x484c, 64, 38, 0},
+    {0x3a0d, 65, 39, 0},
+    {0x2ef1, 67, 40, 0},
+    {0x261f, 68, 41, 0},
+    {0x1f33, 69, 42, 0},
+    {0x19a8, 70, 43, 0},
+    {0x1518, 72, 44, 0},
+    {0x1177, 73, 45, 0},
+    {0x0e74, 74, 46, 0},
+    {0x0bfb, 75, 47, 0},
+    {0x09f8, 77, 48, 0},
+    {0x0861, 78, 49, 0},
+    {0x0706, 79, 50, 0},
+    {0x05cd, 48, 51, 0},
+    {0x04de, 50, 52, 0},
+    {0x040f, 50, 53, 0},
+    {0x0363, 51, 54, 0},
+    {0x02d4, 52, 55, 0},
+    {0x025c, 53, 56, 0},
+    {0x01f8, 54, 57, 0},
+    {0x01a4, 55, 58, 0},
+    {0x0160, 56, 59, 0},
+    {0x0125, 57, 60, 0},
+    {0x00f6, 58, 61, 0},
+    {0x00cb, 59, 62, 0},
+    {0x00ab, 61, 63, 0},
+    {0x008f, 61, 32, 0},
+    {0x5b12, 65, 65, 1},
+    {0x4d04, 80, 66, 0},
+    {0x412c, 81, 67, 0},
+    {0x37d8, 82, 68, 0},
+    {0x2fe8, 83, 69, 0},
+    {0x293c, 84, 70, 0},
+    {0x2379, 86, 71, 0},
+    {0x1edf, 87, 72, 0},
+    {0x1aa9, 87, 73, 0},
+    {0x174e, 72, 74, 0},
+    {0x1424, 72, 75, 0},
+    {0x119c, 74, 76, 0},
+    {0x0f6b, 74, 77, 0},
+    {0x0d51, 75, 78, 0},
+    {0x0bb6, 77, 79, 0},
+    {0x0a40, 77, 48, 0},
+    {0x5832, 80, 81, 1},
+    {0x4d1c, 88, 82, 0},
+    {0x438e, 89, 83, 0},
+    {0x3bdd, 90, 84, 0},
+    {0x34ee, 91, 85, 0},
+    {0x2eae, 92, 86, 0},
+    {0x299a, 93, 87, 0},
+    {0x2516, 86, 71, 0},
+    {0x5570, 88, 89, 1},
+    {0x4ca9, 95, 90, 0},
+    {0x44d9, 96, 91, 0},
+    {0x3e22, 97, 92, 0},
+    {0x3824, 99, 93, 0},
+    {0x32b4, 99, 94, 0},
+    {0x2e17, 93, 86, 0},
+    {0x56a8, 95, 96, 1},
+    {0x4f46, 101, 97, 0},
+    {0x47e5, 102, 98, 0},
+    {0x41cf, 103, 99, 0},
+    {0x3c3d, 104, 100, 0},
+    {0x375e, 99, 93, 0},
+    {0x5231, 105, 102, 0},
+    {0x4c0f, 106, 103, 0},
+    {0x4639, 107, 104, 0},
+    {0x415e, 103, 99, 0},
+    {0x5627, 105, 106, 1},
+    {0x50e7, 108, 107, 0},
+    {0x4b85, 109, 103, 0},
+    {0x5597, 110, 109, 0},
+    {0x504f, 111, 107, 0},
+    {0x5a10, 110, 111, 1},
+    {0x5522, 112, 109, 0},
+    {0x59eb, 112, 111, 1},
+    {0x5a1d, 113, 113, 0},
+};
+
+static int arith_pull(struct Jpeg *j, int *out) {
+    int c = 0;
+    int d = 0;
+    if (j->unread >= 0) {
+        *out = 0;
+        return 0;
+    }
+    if (next_byte(j, &c) != 0) {
+        return -1;
+    }
+    if (c == 0xff) {
+        do {
+            if (next_byte(j, &d) != 0) {
+                return -1;
+            }
+        } while (d == 0xff);
+        if (d == 0) {
+            c = 0xff;
+        } else {
+            j->unread = d;
+            c = 0;
+        }
+    }
+    *out = c;
+    return 0;
+}
+
+static int arith_renorm(struct Jpeg *j) {
+    int guard = 0;
+    while (j->span < 0x8000u) {
+        int b = 0;
+        if (++guard > 16) {
+            return -1;
+        }
+        if (j->bitct == 0) {
+            if (arith_pull(j, &b) != 0) {
+                return -1;
+            }
+            j->code += (unsigned)b << 8;
+            j->bitct = 8;
+        }
+        j->span <<= 1;
+        j->code <<= 1;
+        j->bitct--;
+    }
+    return 0;
+}
+
+/* One binary decision. The statistics byte keeps the MPS in bit 7 and the Qe index below it. */
+static int arith_bin(struct Jpeg *j, unsigned char *st) {
+    unsigned sv = *st;
+    unsigned idx = sv & 0x7fu;
+    unsigned mps = sv >> 7;
+    unsigned qe = 0;
+    unsigned nlps = 0;
+    unsigned nmps = 0;
+    unsigned sw = 0;
+    unsigned cx = 0;
+    unsigned mps_size = 0;
+    int decision = 0;
+    if (idx > 113) {
+        return -1;
+    }
+    qe = k_qe[idx].qe;
+    nlps = k_qe[idx].nlps;
+    nmps = k_qe[idx].nmps;
+    sw = k_qe[idx].sw;
+    if (j->span < qe) {
+        return -1;
+    }
+    j->span -= qe;
+    cx = j->code >> 16;
+    if (cx < j->span) {
+        if (j->span >= 0x8000u) {
+            return (int)mps;
+        }
+        if (j->span < qe) {
+            decision = (int)(mps ^ 1u);
+            *st = (unsigned char)(((mps ^ sw) << 7) | nlps);
+        } else {
+            decision = (int)mps;
+            *st = (unsigned char)((mps << 7) | nmps);
+        }
+    } else {
+        mps_size = j->span;
+        if (mps_size < qe) {
+            decision = (int)mps;
+            *st = (unsigned char)((mps << 7) | nmps);
+        } else {
+            decision = (int)(mps ^ 1u);
+            *st = (unsigned char)(((mps ^ sw) << 7) | nlps);
+        }
+        j->code -= mps_size << 16;
+        j->span = qe;
+    }
+    if (arith_renorm(j) != 0) {
+        return -1;
+    }
+    return decision;
+}
+
+static int arith_open(struct Jpeg *j) {
+    int i = 0;
+    int b = 0;
+    memset(j->dc_stat, 0, sizeof j->dc_stat);
+    memset(j->ac_stat, 0, sizeof j->ac_stat);
+    j->fixed_bin = 113;
+    j->span = 0x10000u;
+    j->code = 0;
+    j->bitct = 0;
+    for (i = 0; i < j->scan_n; i++) {
+        int c = j->scan_comp[i];
+        if (c < 0 || c >= j->ncomp) {
+            return -1;
+        }
+        j->dc_ctx[c] = 0;
+        j->comp[c].pred = 0;
+    }
+    if (arith_pull(j, &b) != 0) {
+        return -1;
+    }
+    j->code = (unsigned)b << 8;
+    j->code <<= 8;
+    if (arith_pull(j, &b) != 0) {
+        return -1;
+    }
+    j->code += (unsigned)b << 8;
+    j->code <<= 8;
+    return 0;
+}
+
+/* DC difference for one block. *level is the reconstructed DC coefficient. */
+static int arith_dc(struct Jpeg *j, int ci, int *level) {
+    struct Comp *comp = &j->comp[ci];
+    int tbl = comp->td;
+    unsigned char *base = NULL;
+    unsigned char *st = NULL;
+    int sign = 0;
+    int m = 0;
+    int v = 0;
+    int bit = 0;
+    int zero = 0;
+    if (tbl < 0 || tbl > 3) {
+        return -1;
+    }
+    base = j->dc_stat[tbl];
+    st = base + j->dc_ctx[ci];
+    zero = arith_bin(j, st);
+    if (zero < 0) {
+        return -1;
+    }
+    if (zero == 0) {
+        j->dc_ctx[ci] = 0;
+        *level = comp->pred;
+        return 0;
+    }
+    sign = arith_bin(j, st + 1);
+    if (sign < 0) {
+        return -1;
+    }
+    st = st + 2 + sign;
+    m = arith_bin(j, st);
+    if (m < 0) {
+        return -1;
+    }
+    if (m != 0) {
+        st = base + 20;
+        for (;;) {
+            int grow = arith_bin(j, st);
+            if (grow < 0) {
+                return -1;
+            }
+            if (!grow) {
+                break;
+            }
+            if (m >= 0x4000 || st + 1 >= base + 49) {
+                return -1;
+            }
+            m <<= 1;
+            st++;
+        }
+    }
+    {
+        int lo = (1 << j->dc_L[tbl]) >> 1;
+        int hi = (1 << j->dc_U[tbl]) >> 1;
+        if (m < lo) {
+            j->dc_ctx[ci] = 0;
+        } else if (m > hi) {
+            j->dc_ctx[ci] = 12 + sign * 4;
+        } else {
+            j->dc_ctx[ci] = 4 + sign * 4;
+        }
+    }
+    v = m;
+    if (m != 0) {
+        st += 14;
+        if (st >= base + 64) {
+            return -1;
+        }
+        while (m >>= 1) {
+            bit = arith_bin(j, st);
+            if (bit < 0) {
+                return -1;
+            }
+            if (bit) {
+                v |= m;
+            }
+        }
+    }
+    v += 1;
+    if (sign) {
+        v = -v;
+    }
+    if (comp->pred > 20000 || comp->pred < -20000 || v > 20000 || v < -20000) {
+        return -1;
+    }
+    comp->pred += v;
+    *level = comp->pred;
+    return 0;
+}
+
+static int arith_value_ac(struct Jpeg *j, int tbl, int k, unsigned char *st, int *out) {
+    unsigned char *base = j->ac_stat[tbl];
+    unsigned char *end = base + 256;
+    int sign = 0;
+    int m = 0;
+    int v = 0;
+    int bit = 0;
+    int again = 0;
+    sign = arith_bin(j, &j->fixed_bin);
+    if (sign < 0) {
+        return -1;
+    }
+    st += 2;
+    if (st >= end) {
+        return -1;
+    }
+    m = arith_bin(j, st);
+    if (m < 0) {
+        return -1;
+    }
+    if (m != 0) {
+        again = arith_bin(j, st);
+        if (again < 0) {
+            return -1;
+        }
+        if (again) {
+            if (m >= 0x4000) {
+                return -1;
+            }
+            m <<= 1;
+            st = base + (k <= j->ac_K[tbl] ? 189 : 217);
+            for (;;) {
+                int grow = arith_bin(j, st);
+                if (grow < 0) {
+                    return -1;
+                }
+                if (!grow) {
+                    break;
+                }
+                if (m >= 0x4000 || st + 1 >= end) {
+                    return -1;
+                }
+                m <<= 1;
+                st++;
+            }
+        }
+    }
+    v = m;
+    if (m != 0) {
+        st += 14;
+        if (st >= end) {
+            return -1;
+        }
+        while (m >>= 1) {
+            bit = arith_bin(j, st);
+            if (bit < 0) {
+                return -1;
+            }
+            if (bit) {
+                v |= m;
+            }
+        }
+    }
+    v += 1;
+    if (sign) {
+        v = -v;
+    }
+    if (v > 32767 || v < -32767) {
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+static int arith_ac(struct Jpeg *j, int ci, int ss, int se, int al, int *coef, const unsigned char *quant, short *prog) {
+    int tbl = j->comp[ci].ta;
+    unsigned char *base = NULL;
+    int k = 0;
+    if (tbl < 0 || tbl > 3 || ss < 1 || se > 63 || ss > se) {
+        return -1;
+    }
+    if ((coef == NULL && prog == NULL) || (coef != NULL && quant == NULL)) {
+        return -1;
+    }
+    base = j->ac_stat[tbl];
+    k = ss - 1;
+    while (k < se) {
+        unsigned char *st = base + 3 * k;
+        int eob = 0;
+        int v = 0;
+        int nat = 0;
+        if (st + 1 >= base + 256) {
+            return -1;
+        }
+        eob = arith_bin(j, st);
+        if (eob < 0) {
+            return -1;
+        }
+        if (eob) {
+            break;
+        }
+        for (;;) {
+            int nz = 0;
+            k++;
+            if (k > se) {
+                return -1;
+            }
+            nz = arith_bin(j, st + 1);
+            if (nz < 0) {
+                return -1;
+            }
+            if (nz) {
+                break;
+            }
+            st += 3;
+            if (k >= se || st + 1 >= base + 256) {
+                return -1;
+            }
+        }
+        if (arith_value_ac(j, tbl, k, st, &v) != 0) {
+            return -1;
+        }
+        nat = k_zigzag[k];
+        if (coef != NULL) {
+            coef[nat] = v * (int)quant[k];
+        } else if (put_mag(&prog[nat], shl_coef(v, al)) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int arith_ac_refine(struct Jpeg *j, int ci, short *data) {
+    int tbl = j->comp[ci].ta;
+    unsigned char *base = NULL;
+    int kex = -1;
+    int k = 0;
+    int t = 0;
+    if (tbl < 0 || tbl > 3 || data == NULL) {
+        return -1;
+    }
+    base = j->ac_stat[tbl];
+    for (t = j->se; t >= 0; t--) {
+        if (data[k_zigzag[t]] != 0) {
+            kex = t;
+            break;
+        }
+    }
+    k = j->ss - 1;
+    while (k < j->se) {
+        unsigned char *st = base + 3 * k;
+        int eob = 0;
+        if (k < 0 || st + 2 >= base + 256) {
+            return -1;
+        }
+        if (k >= kex) {
+            eob = arith_bin(j, st);
+            if (eob < 0) {
+                return -1;
+            }
+            if (eob) {
+                break;
+            }
+        }
+        for (;;) {
+            int nat = 0;
+            int nz = 0;
+            int bit = 0;
+            int sign = 0;
+            int step = 0;
+            k++;
+            if (k > j->se || k > 63) {
+                return -1;
+            }
+            nat = k_zigzag[k];
+            if (data[nat] != 0) {
+                bit = arith_bin(j, st + 2);
+                if (bit < 0) {
+                    return -1;
+                }
+                if (bit) {
+                    if (j->al < 0 || j->al > 14) {
+                        return -1;
+                    }
+                    step = 1 << j->al;
+                    if (data[nat] > 0) {
+                        if (data[nat] > 32767 - step) {
+                            return -1;
+                        }
+                        data[nat] = (short)(data[nat] + step);
+                    } else {
+                        if (data[nat] < -32767 + step) {
+                            return -1;
+                        }
+                        data[nat] = (short)(data[nat] - step);
+                    }
+                }
+                break;
+            }
+            nz = arith_bin(j, st + 1);
+            if (nz < 0) {
+                return -1;
+            }
+            if (nz) {
+                sign = arith_bin(j, &j->fixed_bin);
+                if (sign < 0 || j->al < 0 || j->al > 14) {
+                    return -1;
+                }
+                step = 1 << j->al;
+                data[nat] = (short)(sign ? -step : step);
+                break;
+            }
+            st += 3;
+            if (k >= j->se || st + 2 >= base + 256) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int arith_block(struct Jpeg *j, struct Comp *comp, unsigned char *dst) {
+    int coef[64];
+    int ci = (int)(comp - j->comp);
+    int dc = 0;
+    const unsigned char *quant = NULL;
+    if (ci < 0 || ci >= j->ncomp || comp->tq < 0 || comp->tq > 3 || !j->quant_ok[comp->tq]) {
+        return -1;
+    }
+    quant = j->quant[comp->tq];
+    memset(coef, 0, sizeof coef);
+    if (arith_dc(j, ci, &dc) != 0) {
+        return -1;
+    }
+    coef[0] = dc * (int)quant[0];
+    if (arith_ac(j, ci, 1, 63, 0, coef, quant, NULL) != 0) {
+        return -1;
+    }
+    idct8(coef, dst);
+    return 0;
+}
+
+static int arith_prog_block(struct Jpeg *j, struct Comp *comp, short *data) {
+    int ci = (int)(comp - j->comp);
+    if (ci < 0 || ci >= j->ncomp || data == NULL) {
+        return -1;
+    }
+    if (j->ah == 0 && j->ss == 0) {
+        int dc = 0;
+        if (arith_dc(j, ci, &dc) != 0 || put_mag(&data[0], shl_coef(dc, j->al)) != 0) {
+            return -1;
+        }
+        if (j->se == 0) {
+            return 0;
+        }
+        return arith_ac(j, ci, 1, j->se, j->al, NULL, NULL, data);
+    }
+    if (j->ah != 0 && j->ss == 0) {
+        int bit = arith_bin(j, &j->fixed_bin);
+        int step = 0;
+        if (bit < 0 || j->al < 0 || j->al > 14) {
+            return -1;
+        }
+        if (bit) {
+            step = 1 << j->al;
+            data[0] = (short)((int)data[0] | step);
+        }
+        return 0;
+    }
+    if (j->ah == 0) {
+        return arith_ac(j, ci, j->ss, j->se, j->al, NULL, NULL, data);
+    }
+    return arith_ac_refine(j, ci, data);
+}
+
+static int parse_dac(struct Jpeg *j, const unsigned char *data, int len) {
+    int at = 0;
+    if (len < 2 || (len & 1) != 0) {
+        return -1;
+    }
+    while (at < len) {
+        int tc = data[at] >> 4;
+        int tb = data[at] & 15;
+        int cs = data[at + 1];
+        at += 2;
+        if (tb > 3) {
+            return -1;
+        }
+        if (tc == 0) {
+            int u = cs >> 4;
+            int l = cs & 15;
+            if (l > u) {
+                return -1;
+            }
+            j->dc_L[tb] = l;
+            j->dc_U[tb] = u;
+        } else if (tc == 1) {
+            if (cs < 1 || cs > 63) {
+                return -1;
+            }
+            j->ac_K[tb] = cs;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void note_adobe(struct Jpeg *j, const unsigned char *data, int len) {
+    if (len >= 12 && data[0] == 'A' && data[1] == 'd' && data[2] == 'o' && data[3] == 'b' && data[4] == 'e') {
+        j->saw_adobe = 1;
+        j->adobe = data[11];
+    }
+}
+
+static void jpeg_prepare(struct Jpeg *j) {
+    int i = 0;
+    j->unread = -1;
+    for (i = 0; i < 4; i++) {
+        j->dc_L[i] = 0;
+        j->dc_U[i] = 1;
+        j->ac_K[i] = 5;
+    }
+}
+
 static int decode_block(struct Jpeg *j, struct Comp *comp, unsigned char *dst) {
+    if (j->arith) {
+        return arith_block(j, comp, dst);
+    }
     int coef[64];
     int k = 1;
     int cat = 0;
@@ -378,6 +1073,11 @@ static int decode_block(struct Jpeg *j, struct Comp *comp, unsigned char *dst) {
 
 static int marker_of(struct Jpeg *j, int *out) {
     int c = 0;
+    if (j->unread >= 0) {
+        *out = j->unread;
+        j->unread = -1;
+        return 0;
+    }
     if (next_byte(j, &c) != 0) {
         return -1;
     }
@@ -484,7 +1184,7 @@ static int parse_sof(struct Jpeg *j, const unsigned char *data, int len) {
     j->height = (data[1] << 8) | data[2];
     j->width = (data[3] << 8) | data[4];
     n = data[5];
-    if (j->width < 1 || j->height < 1 || j->width > 4096 || j->height > 4096 || (n != 1 && n != 3) ||
+    if (j->width < 1 || j->height < 1 || j->width > 4096 || j->height > 4096 || (n != 1 && n != 3 && n != 4) ||
         len < 6 + n * 3) {
         return -1;
     }
@@ -518,7 +1218,7 @@ static int parse_sof(struct Jpeg *j, const unsigned char *data, int len) {
 static int parse_sos(struct Jpeg *j, const unsigned char *data, int len) {
     int n = 0;
     int i = 0;
-    int seen[3] = {0, 0, 0};
+    int seen[4] = {0, 0, 0, 0};
     if (!j->saw_sof || len < 1) {
         return -1;
     }
@@ -675,6 +1375,9 @@ static int shl_coef(int mag, int al) {
 /* One block of a progressive scan. DC and AC, first pass and refinement, share this. */
 static int decode_prog_block(struct Jpeg *j, struct Comp *comp, short *data) {
     int k = j->ss;
+    if (j->arith) {
+        return arith_prog_block(j, comp, data);
+    }
     if (j->ah == 0 && j->ss == 0) {
         int cat = 0;
         int bits = 0;
@@ -851,6 +1554,9 @@ static int decode_scan_prog(struct Jpeg *j) {
             j->comp[j->scan_comp[i]].pred = 0;
         }
     }
+    if (j->arith && arith_open(j) != 0) {
+        return -1;
+    }
     if (j->scan_n > 1) {
         total = cols * rows;
         for (int row = 0; row < rows; row++) {
@@ -886,6 +1592,9 @@ static int decode_scan_prog(struct Jpeg *j) {
                     for (c = 0; c < j->scan_n; c++) {
                         j->comp[j->scan_comp[c]].pred = 0;
                     }
+                    if (j->arith && arith_open(j) != 0) {
+                        return -1;
+                    }
                 }
             }
         }
@@ -903,6 +1612,9 @@ static int decode_scan_prog(struct Jpeg *j) {
                 rst++;
                 j->eob_run = 0;
                 comp->pred = 0;
+                if (j->arith && arith_open(j) != 0) {
+                    return -1;
+                }
             }
         }
     }
@@ -997,6 +1709,9 @@ static int decode_scan(struct Jpeg *j) {
             return -1;
         }
     }
+    if (j->arith && arith_open(j) != 0) {
+        return -1;
+    }
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
             for (i = 0; i < j->ncomp; i++) {
@@ -1034,6 +1749,9 @@ static int decode_scan(struct Jpeg *j) {
                 for (c = 0; c < j->ncomp; c++) {
                     j->comp[c].pred = 0;
                 }
+                if (j->arith && arith_open(j) != 0) {
+                    return -1;
+                }
             }
         }
     }
@@ -1047,6 +1765,7 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
     int y = 0;
     int x = 0;
     memset(&j, 0, sizeof j);
+    jpeg_prepare(&j);
     if (bytes == NULL || n < 4 || rgba == NULL || w == NULL || h == NULL) {
         return -1;
     }
@@ -1088,8 +1807,9 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
             jpeg_clear(&j);
             return -1;
         }
-        if (m == 0xc0 || m == 0xc2) {
-            j.progressive = m == 0xc2;
+        if (m == 0xc0 || m == 0xc2 || m == 0xc9 || m == 0xca) {
+            j.progressive = m == 0xc2 || m == 0xca;
+            j.arith = m == 0xc9 || m == 0xca;
             if (parse_sof(&j, data, len) != 0 || (j.progressive && alloc_coef(&j) != 0)) {
                 jpeg_clear(&j);
                 return -1;
@@ -1110,7 +1830,14 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
                 return -1;
             }
             j.restart = (data[0] << 8) | data[1];
-        } else if (m == 0xc1 || m == 0xc3 || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcf)) {
+        } else if (m == 0xcc) {
+            if (parse_dac(&j, data, len) != 0) {
+                jpeg_clear(&j);
+                return -1;
+            }
+        } else if (m == 0xee) {
+            note_adobe(&j, data, len);
+        } else if (m == 0xc1 || m == 0xc3 || (m >= 0xc5 && m <= 0xc7) || m == 0xcb || (m >= 0xcd && m <= 0xcf)) {
             jpeg_clear(&j);
             return -1;
         }
@@ -1152,6 +1879,62 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
             yv = j.comp[0].plane[(size_t)sy0 * (size_t)j.comp[0].pw + (size_t)sx0];
             if (j.ncomp == 1) {
                 r = g = b = yv;
+            } else if (j.ncomp == 4) {
+                int c1 = 0;
+                int c2 = 0;
+                int c3 = 0;
+                int sx1 = x * j.comp[1].h / j.maxh;
+                int sy1 = y * j.comp[1].v / j.maxv;
+                int sx2 = x * j.comp[2].h / j.maxh;
+                int sy2 = y * j.comp[2].v / j.maxv;
+                int sx3 = x * j.comp[3].h / j.maxh;
+                int sy3 = y * j.comp[3].v / j.maxv;
+                if (j.comp[1].plane == NULL || j.comp[2].plane == NULL || j.comp[3].plane == NULL || sx1 < 0 ||
+                    sy1 < 0 || sx2 < 0 || sy2 < 0 || sx3 < 0 || sy3 < 0 || sx1 >= j.comp[1].pw || sy1 >= j.comp[1].ph ||
+                    sx2 >= j.comp[2].pw || sy2 >= j.comp[2].ph || sx3 >= j.comp[3].pw || sy3 >= j.comp[3].ph) {
+                    free(out);
+                    jpeg_clear(&j);
+                    return -1;
+                }
+                c1 = j.comp[1].plane[(size_t)sy1 * (size_t)j.comp[1].pw + (size_t)sx1];
+                c2 = j.comp[2].plane[(size_t)sy2 * (size_t)j.comp[2].pw + (size_t)sx2];
+                c3 = j.comp[3].plane[(size_t)sy3 * (size_t)j.comp[3].pw + (size_t)sx3];
+                if (j.saw_adobe && j.adobe == 2) {
+                    int cb = c1 - 128;
+                    int cr = c2 - 128;
+                    r = (int)(yv + 1.402 * cr + 0.5);
+                    g = (int)(yv - 0.344136 * cb - 0.714136 * cr + 0.5);
+                    b = (int)(yv + 1.772 * cb + 0.5);
+                    if (r < 0) {
+                        r = 0;
+                    }
+                    if (g < 0) {
+                        g = 0;
+                    }
+                    if (b < 0) {
+                        b = 0;
+                    }
+                    if (r > 255) {
+                        r = 255;
+                    }
+                    if (g > 255) {
+                        g = 255;
+                    }
+                    if (b > 255) {
+                        b = 255;
+                    }
+                    /* YCCK stores the ink as the complement of that YCbCr triple. */
+                    r = 255 - r;
+                    g = 255 - g;
+                    b = 255 - b;
+                    r = (r * c3 + 127) / 255;
+                    g = (g * c3 + 127) / 255;
+                    b = (b * c3 + 127) / 255;
+                } else {
+                    r = (yv * c3 + 127) / 255;
+                    g = (c1 * c3 + 127) / 255;
+                    b = (c2 * c3 + 127) / 255;
+                }
             } else {
                 int sx1 = x * j.comp[1].h / j.maxh;
                 int sy1 = y * j.comp[1].v / j.maxv;

@@ -28,9 +28,9 @@ build/doc_test: src/doc.c src/doc_test.c src/doc.h src/utf8.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/doc_test.c src/doc.c
 
-build/page_test: src/page.c src/page_test.c src/page.h src/utf8.h third_party/stb_truetype.h
+build/page_test: src/page.c src/page_test.c src/page.h src/linkurl.h src/mdmath.c src/mdmath.h src/utf8.h third_party/stb_truetype.h
 	mkdir -p build
-	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -Ithird_party -o $@ src/page_test.c src/page.c -lm
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -Ithird_party -o $@ src/page_test.c src/page.c src/mdmath.c -lm
 
 build/chrome_test: src/chrome.c src/chrome_test.c src/chrome.h
 	mkdir -p build
@@ -40,9 +40,13 @@ build/ime_test: src/ime.c src/ime_test.c src/ime.h src/utf8.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -pthread -o $@ src/ime_test.c src/ime.c
 
-build/html_test: src/html.c src/html_test.c src/html.h
+build/html_test: src/html.c src/html_test.c src/html.h src/linkurl.h src/mdmath.c src/mdmath.h
 	mkdir -p build
-	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/html_test.c src/html.c
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/html_test.c src/html.c src/mdmath.c
+
+build/mdmath_test: src/mdmath.c src/mdmath_test.c src/mdmath.h src/utf8.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/mdmath_test.c src/mdmath.c
 
 build/fontlist_test: src/fontlist.c src/fontlist_test.c src/fontlist.h
 	mkdir -p build
@@ -52,7 +56,7 @@ build/image_test: src/image.c src/image_test.c src/image.h
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Isrc -o $@ src/image_test.c src/image.c -lz
 
-test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test build/fontlist_test build/image_test
+test: build/doc_test build/page_test build/chrome_test build/ime_test build/html_test build/fontlist_test build/image_test build/mdmath_test
 	./build/doc_test
 	./build/page_test
 	./build/chrome_test
@@ -60,6 +64,7 @@ test: build/doc_test build/page_test build/chrome_test build/ime_test build/html
 	./build/html_test
 	./build/fontlist_test
 	./build/image_test
+	./build/mdmath_test
 
 build/obj/%/chrome.o: src/chrome.c src/chrome.h
 	mkdir -p $(dir $@)
@@ -77,7 +82,7 @@ build/obj/%/doc.o: src/doc.c src/doc.h src/utf8.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/doc.c
 
-build/obj/%/page.o: src/page.c src/page.h src/utf8.h third_party/stb_truetype.h
+build/obj/%/page.o: src/page.c src/page.h src/linkurl.h src/mdmath.h src/utf8.h third_party/stb_truetype.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/page.c
 
@@ -85,9 +90,13 @@ build/obj/%/glue.o: $(GLUE)/android_native_app_glue.c
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(GLUE_CFLAGS) -c -o $@ $(GLUE)/android_native_app_glue.c
 
-build/obj/%/html.o: src/html.c src/html.h
+build/obj/%/html.o: src/html.c src/html.h src/linkurl.h src/mdmath.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/html.c
+
+build/obj/%/mdmath.o: src/mdmath.c src/mdmath.h src/utf8.h
+	mkdir -p $(dir $@)
+	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/mdmath.c
 
 build/obj/%/fontlist.o: src/fontlist.c src/fontlist.h
 	mkdir -p $(dir $@)
@@ -97,7 +106,7 @@ build/obj/%/image.o: src/image.c src/image.h
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(CFLAGS) -c -o $@ src/image.c
 
-build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/fontlist.o build/obj/%/image.o build/obj/%/glue.o
+build/lib/%/libpenship.so: build/obj/%/main.o build/obj/%/doc.o build/obj/%/page.o build/obj/%/chrome.o build/obj/%/ime.o build/obj/%/html.o build/obj/%/fontlist.o build/obj/%/image.o build/obj/%/mdmath.o build/obj/%/glue.o
 	@test -n "$(NDK)" || (echo "NDK not found under $(ANDROID_HOME)/ndk" && exit 1)
 	mkdir -p $(dir $@)
 	$(TOOLCHAIN)/bin/$(call triple,$*)-clang $(LDFLAGS) -o $@ $^

@@ -1,5 +1,8 @@
 #include "html.h"
 
+#include "linkurl.h"
+#include "mdmath.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +66,65 @@ static int escape(struct Buf *b, const char *s, size_t n) {
         }
     }
     return 0;
+}
+
+static int dollar_only(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    if (i + 2 > n || s[i] != '$' || s[i + 1] != '$') {
+        return 0;
+    }
+    i += 2;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    return i == n;
+}
+
+static int display_body(const char *s, size_t n, size_t *lo, size_t *hi) {
+    size_t i = 0;
+    size_t end = n;
+    while (i < end && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    while (end > i && (s[end - 1] == ' ' || s[end - 1] == '\t')) {
+        end--;
+    }
+    if (end < i + 5 || s[i] != '$' || s[i + 1] != '$' || s[end - 1] != '$' || s[end - 2] != '$') {
+        return 0;
+    }
+    if (i + 2 >= end - 2) {
+        return 0;
+    }
+    *lo = i + 2;
+    *hi = end - 2;
+    return 1;
+}
+
+static int lone_dollar(const char *s, size_t n, size_t i) {
+    if (i >= n || s[i] != '$') {
+        return 0;
+    }
+    if (i > 0 && s[i - 1] == '$') {
+        return 0;
+    }
+    if (i + 1 < n && s[i + 1] == '$') {
+        return 0;
+    }
+    return 1;
+}
+
+static int emit_math(struct Buf *b, const char *s, size_t n, int display) {
+    char ml[4096];
+    if (n == 0) {
+        return 0;
+    }
+    if (math_mathml(s, n, display, ml, sizeof ml) == 0) {
+        return adds(b, ml);
+    }
+    return escape(b, s, n);
 }
 
 static int fence_mark(const char *s, size_t n) {
@@ -613,6 +675,19 @@ static int inline_html(struct Buf *b, const struct Ref *refs, int nref, const ch
                 continue;
             }
         }
+        if (lone_dollar(s, n, i)) {
+            size_t j = i + 1;
+            while (j < n && !lone_dollar(s, n, j)) {
+                j++;
+            }
+            if (j < n && j > i + 1) {
+                if (emit_math(b, s + i + 1, j - (i + 1), 0) != 0) {
+                    return -1;
+                }
+                i = j + 1;
+                continue;
+            }
+        }
         size_t esc = escaped_punct(s, n, i);
         if (esc != i) {
             if (escape(b, s + i + 1, 1) != 0) {
@@ -627,6 +702,30 @@ static int inline_html(struct Buf *b, const struct Ref *refs, int nref, const ch
                 return -1;
             }
             if (auto_link > 0) {
+                continue;
+            }
+        }
+        {
+            size_t bare = 0;
+            int www = 0;
+            if (link_extended(s, n, i, &bare, &www)) {
+                if (adds(b, "<a href=\"") != 0 || (www && adds(b, "http://") != 0) || escape(b, s + i, bare - i) != 0 ||
+                    adds(b, "\">") != 0 || escape(b, s + i, bare - i) != 0 || adds(b, "</a>") != 0) {
+                    return -1;
+                }
+                i = bare;
+                continue;
+            }
+        }
+        {
+            size_t bare = 0;
+            int scheme = 0;
+            if (link_email(s, n, i, &bare, &scheme)) {
+                if (adds(b, "<a href=\"") != 0 || (!scheme && adds(b, "mailto:") != 0) || escape(b, s + i, bare - i) != 0 ||
+                    adds(b, "\">") != 0 || escape(b, s + i, bare - i) != 0 || adds(b, "</a>") != 0) {
+                    return -1;
+                }
+                i = bare;
                 continue;
             }
         }
@@ -888,6 +987,62 @@ int html_export(const char *text, size_t n, char **out, size_t *out_len) {
                 break;
             }
             continue;
+        }
+        if (dollar_only(line.s, line.n)) {
+            size_t save = i;
+            char body[1025];
+            size_t bn = 0;
+            int closed = 0;
+            body[0] = '\0';
+            while (i <= n) {
+                struct Line inner;
+                size_t at = i;
+                if (!next_line(text, n, &i, &inner) || (inner.n == 0 && i >= n)) {
+                    i = at;
+                    break;
+                }
+                if (dollar_only(inner.s, inner.n)) {
+                    closed = 1;
+                    break;
+                }
+                if (bn > 0) {
+                    if (bn + 1 >= sizeof body) {
+                        closed = 0;
+                        i = save;
+                        break;
+                    }
+                    body[bn++] = ' ';
+                }
+                if (inner.n >= sizeof body - bn) {
+                    closed = 0;
+                    i = save;
+                    break;
+                }
+                if (inner.n > 0) {
+                    memcpy(body + bn, inner.s, inner.n);
+                    bn += inner.n;
+                }
+                body[bn] = '\0';
+            }
+            if (closed && bn > 0) {
+                if (emit_math(&b, body, bn, 1) != 0 || adds(&b, "\n") != 0) {
+                    free(b.s);
+                    return -1;
+                }
+                continue;
+            }
+            i = save;
+        }
+        {
+            size_t lo = 0;
+            size_t hi = 0;
+            if (display_body(line.s, line.n, &lo, &hi)) {
+                if (emit_math(&b, line.s + lo, hi - lo, 1) != 0 || adds(&b, "\n") != 0) {
+                    free(b.s);
+                    return -1;
+                }
+                continue;
+            }
         }
         int mark = fence_mark(line.s, line.n);
         if (mark != 0) {

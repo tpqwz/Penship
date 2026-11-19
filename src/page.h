@@ -123,6 +123,11 @@ int page_set_font(const unsigned char *ttf, int len);
 /* which 1 is bold and 2 is italic. A null file clears that face and strong or emphasis falls back. */
 int page_set_style(int which, const unsigned char *ttf, int len);
 
+/* The face for inline code and code blocks. ttf must stay alive. A null file clears it and code uses the body face.
+   Returns 0, or -1 when the bytes are not a TrueType font. page_mono is 1 while a code face is set. */
+int page_set_mono(const unsigned char *ttf, int len);
+int page_mono(void);
+
 /* Inset of the text inside the content box. */
 int page_margin(int font_px);
 
@@ -177,7 +182,8 @@ int page_caret_box(int *x, int *y, int *h);
 /* Ends of the selection drawn by the last page_draw. Returns 0, or -1 when there is no selection on screen. */
 int page_sel_ends(int *x0, int *y0, int *x1, int *y1, int *h);
 
-/* Copy the http(s) address of the link that contains at. Returns 0, or -1. */
+/* Copy the http(s) or mailto address of the link that contains at.
+   A bracket link, an angle-bracket address, or a bare http(s), www, or email address. Returns 0, or -1. */
 int page_link_url(const char *text, size_t len, size_t at, char *out, size_t cap);
 
 /* 0 when the point is on the start edge, 1 on the end edge, or -1. */

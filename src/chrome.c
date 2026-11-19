@@ -7,7 +7,7 @@ static const char *k_labels[CHROME_COUNT] = {
     "Open",   "Save",     "Save as", "Export", "Contents", "Smaller", "Larger", "Font", "Typewriter",
     "Focus",  "Line",     "Theme",   "Source", "Menu",     "Done",    "Bold",   "Italic", "Strike", "Code",
     "Link",   "Head",     "List",    "Task",   "Quote",    "Rule",    "Table",  "Block",  "Read only", "Find",
-    "Settings", "Font file", "Glide", "Sections", "Bar", "Download faces", "Font lists"};
+    "Settings", "Font file", "Glide", "Sections", "Bar", "Download faces", "Font lists", "Code font"};
 static const int k_steps[] = {14, 16, 18, 20, 24, 28, 32};
 
 const char *chrome_label(int index) {
@@ -15,6 +15,27 @@ const char *chrome_label(int index) {
         return "";
     }
     return k_labels[index];
+}
+
+const char *chrome_state_label(int index, int on) {
+    switch (index) {
+    case CHROME_TYPEWRITER:
+        return on ? "Typewriter on" : "Typewriter off";
+    case CHROME_FOCUS:
+        return on ? "Focus on" : "Focus off";
+    case CHROME_LINE:
+        return on ? "Line on" : "Line off";
+    case CHROME_SECTIONS:
+        return on ? "Sections on" : "Sections off";
+    case CHROME_THEME:
+        return on ? "Theme night" : "Theme day";
+    case CHROME_SOURCE:
+        return on ? "Source on" : "Source off";
+    case CHROME_READONLY:
+        return on ? "Read only on" : "Read only off";
+    default:
+        return NULL;
+    }
 }
 
 int text_step_count(void) {
@@ -144,12 +165,12 @@ static void place_column(struct Chrome *chrome, const int *rows, int n, int widt
 
 /* Settings is grouped. Each group leaves a band above its first row for a title. */
 static void place_settings(struct Chrome *chrome, int width, int inset_top, int inner, int thumb, int row, int *scroll) {
-    static const int type_rows[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT};
+    static const int type_rows[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT, CHROME_CODEFONT};
     static const int face_rows[] = {CHROME_FONTFILE, CHROME_GETFACES, CHROME_LISTS};
     static const int read_rows[] = {CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE, CHROME_SECTIONS, CHROME_BAR, CHROME_GLIDE};
     static const int page_rows[] = {CHROME_THEME, CHROME_SOURCE, CHROME_READONLY};
     static const int *groups[] = {type_rows, face_rows, read_rows, page_rows};
-    static const int counts[] = {3, 3, 6, 3};
+    static const int counts[] = {4, 3, 6, 3};
     int head = row / 2;
     int total = 0;
     int max_scroll = 0;

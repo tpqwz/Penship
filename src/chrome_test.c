@@ -114,7 +114,8 @@ static void test_settings_view(void) {
     expect(chrome.w[CHROME_SMALLER] == 0 && chrome.w[CHROME_FONT] == 0, "preferences wait on their own screen");
     expect(chrome.w[CHROME_BOLD] == 0 && chrome.w[CHROME_CODE] == 0, "the formatting bar waits for the page");
     chrome_place(&chrome, width, height, 80, 160, density, 2, 1000, NULL, NULL, 1);
-    int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT,  CHROME_FONTFILE, CHROME_GETFACES, CHROME_LISTS,
+    int prefs[] = {CHROME_SMALLER, CHROME_LARGER, CHROME_FONT, CHROME_CODEFONT, CHROME_FONTFILE, CHROME_GETFACES,
+                   CHROME_LISTS,
                    CHROME_TYPEWRITER,
                    CHROME_FOCUS,  CHROME_LINE,   CHROME_SECTIONS, CHROME_BAR, CHROME_GLIDE, CHROME_THEME, CHROME_SOURCE,
                    CHROME_READONLY};
@@ -122,7 +123,9 @@ static void test_settings_view(void) {
         expect_placed(&chrome, prefs[i], width, height);
     }
     expect(chrome.w[CHROME_OPEN] == 0 && chrome.w[CHROME_FIND] == 0, "the file menu waits behind settings");
-    expect(chrome.y[CHROME_FONTFILE] > chrome.y[CHROME_FONT], "font file sits under font");
+    expect(chrome.y[CHROME_CODEFONT] > chrome.y[CHROME_FONT], "code font sits under font");
+    expect(chrome.y[CHROME_FONTFILE] > chrome.y[CHROME_CODEFONT], "font file sits under code font");
+    expect(strcmp(chrome_label(CHROME_CODEFONT), "Code font") == 0, "code font label");
     expect(chrome.y[CHROME_GETFACES] > chrome.y[CHROME_FONTFILE], "download sits under font file");
     expect(chrome.y[CHROME_LISTS] > chrome.y[CHROME_GETFACES], "font lists sits under download");
     expect(strcmp(chrome_label(CHROME_GETFACES), "Download faces") == 0, "download faces label");
@@ -134,6 +137,16 @@ static void test_settings_view(void) {
     expect(chrome.y[CHROME_BAR] > chrome.y[CHROME_SECTIONS], "bar sits under sections");
     expect(chrome.y[CHROME_GLIDE] > chrome.y[CHROME_BAR], "glide sits under bar");
     expect(strcmp(chrome_label(CHROME_SECTIONS), "Sections") == 0, "sections label");
+    expect(strcmp(chrome_state_label(CHROME_TYPEWRITER, 0), "Typewriter off") == 0, "typewriter shows off");
+    expect(strcmp(chrome_state_label(CHROME_TYPEWRITER, 1), "Typewriter on") == 0, "typewriter shows on");
+    expect(strcmp(chrome_state_label(CHROME_FOCUS, 0), "Focus off") == 0, "focus shows off");
+    expect(strcmp(chrome_state_label(CHROME_LINE, 1), "Line on") == 0, "line shows on");
+    expect(strcmp(chrome_state_label(CHROME_SECTIONS, 1), "Sections on") == 0, "sections shows on");
+    expect(strcmp(chrome_state_label(CHROME_THEME, 0), "Theme day") == 0, "theme shows day");
+    expect(strcmp(chrome_state_label(CHROME_THEME, 1), "Theme night") == 0, "theme shows night");
+    expect(strcmp(chrome_state_label(CHROME_SOURCE, 0), "Source off") == 0, "source shows off");
+    expect(strcmp(chrome_state_label(CHROME_READONLY, 1), "Read only on") == 0, "read only shows on");
+    expect(chrome_state_label(CHROME_OPEN, 1) == NULL, "open is not a switch");
     expect(strcmp(chrome_label(CHROME_GLIDE), "Glide") == 0, "glide label");
     expect(strcmp(chrome_label(CHROME_LINE), "Line") == 0, "line label");
     expect(chrome.y[CHROME_READONLY] > chrome.y[CHROME_SOURCE], "read only sits under source");

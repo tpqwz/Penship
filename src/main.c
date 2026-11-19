@@ -63,6 +63,9 @@ static void load_picked(struct App *app);
 static void remember_picked(struct App *app);
 static int apply_picked(struct App *app, int slot);
 static void read_custom_name(struct App *app);
+static void apply_code_font(struct App *app);
+static void cycle_code_font(struct App *app);
+static void code_row_label(const struct App *app, char *out, size_t cap);
 
 struct App {
     struct android_app *android;
@@ -99,6 +102,13 @@ struct App {
     int face;
     int got_face[3];
     int system_font;
+    /* -1 until prefs or the first apply. 0 is the body face, 1 Liberation Mono, 2 a phone mono, 3 a picked mono. */
+    int code_mode;
+    char code_pick[FONT_NAME_MAX];
+    unsigned char *code_ttf;
+    int code_len;
+    char code_sys[512];
+    int code_sys_tried;
     int fetching;
     int face_failed;
     int lists;
@@ -732,11 +742,39 @@ static void render(struct App *app) {
     }
     const char *labels[CHROME_COUNT];
     char face_label[80];
+    char code_label[80];
     face_label[0] = '\0';
+    code_label[0] = '\0';
     for (int i = 0; i < CHROME_COUNT; i++) {
         labels[i] = (i == CHROME_SETTINGS || (i >= CHROME_BOLD && i <= CHROME_BLOCK)) ? "" : chrome_label(i);
     }
+    static const int k_switch[] = {CHROME_TYPEWRITER, CHROME_FOCUS, CHROME_LINE, CHROME_SECTIONS,
+                                   CHROME_THEME,     CHROME_SOURCE, CHROME_READONLY};
     static const char *k_glide_label[] = {"Glide off", "Glide short", "Glide medium", "Glide long", "Glide far"};
+    for (int s = 0; s < (int)(sizeof k_switch / sizeof k_switch[0]); s++) {
+        int index = k_switch[s];
+        int on = 0;
+        const char *state = NULL;
+        if (index == CHROME_TYPEWRITER) {
+            on = page_typewriter();
+        } else if (index == CHROME_FOCUS) {
+            on = page_focus();
+        } else if (index == CHROME_LINE) {
+            on = page_line();
+        } else if (index == CHROME_SECTIONS) {
+            on = page_sections();
+        } else if (index == CHROME_THEME) {
+            on = page_theme();
+        } else if (index == CHROME_SOURCE) {
+            on = page_source();
+        } else if (index == CHROME_READONLY) {
+            on = page_readonly();
+        }
+        state = chrome_state_label(index, on);
+        if (state != NULL) {
+            labels[index] = state;
+        }
+    }
     {
         int level = page_glide_level();
         if (level < 0) {
@@ -747,7 +785,6 @@ static void render(struct App *app) {
         }
         labels[CHROME_GLIDE] = k_glide_label[level];
     }
-    labels[CHROME_SECTIONS] = page_sections() ? "Sections on" : "Sections off";
     {
         static const char *k_face[] = {"Font system", "Font sans", "Font serif", "Font mono", "Font file"};
         int which = 0;
@@ -769,6 +806,8 @@ static void render(struct App *app) {
         snprintf(face_label, sizeof face_label, "Font %s", app->custom_name);
         labels[CHROME_FONT] = face_label;
     }
+    code_row_label(app, code_label, sizeof code_label);
+    labels[CHROME_CODEFONT] = code_label;
     if (app->fetching) {
         labels[CHROME_GETFACES] = "Getting faces";
     } else if (app->got_face[0] && app->got_face[1] && app->got_face[2]) {
@@ -1090,15 +1129,25 @@ static void save_prefs(struct App *app) {
     if (face > 4) {
         face = 0;
     }
+    char code_pref[FONT_NAME_MAX + 16];
+    if (app->code_mode == 1) {
+        memcpy(code_pref, "liberation", sizeof "liberation");
+    } else if (app->code_mode == 2) {
+        memcpy(code_pref, "sys", sizeof "sys");
+    } else if (app->code_mode == 3 && app->code_pick[0] != '\0') {
+        snprintf(code_pref, sizeof code_pref, "pick:%s", app->code_pick);
+    } else {
+        memcpy(code_pref, "text", sizeof "text");
+    }
     FILE *f = fopen(app->prefs_path, "w");
     if (f == NULL) {
         return;
     }
     if (fprintf(f,
                 "step=%d\nface=%d\ntypewriter=%d\nfocus=%d\nline=%d\nglide=%d\ntheme=%d\nsource=%d\nreadonly=%d\n"
-                "sections=%d\nbar=%d\n",
+                "sections=%d\nbar=%d\ncode=%s\n",
                 step, face, page_typewriter(), page_focus(), page_line(), page_glide_level(), page_theme(),
-                page_source(), page_readonly(), page_sections(), page_bar()) < 0) {
+                page_source(), page_readonly(), page_sections(), page_bar(), code_pref) < 0) {
         fclose(f);
         return;
     }
@@ -1108,6 +1157,8 @@ static void save_prefs(struct App *app) {
 static void load_prefs(struct App *app) {
     app->step = text_step_default();
     app->face = 0;
+    app->code_mode = -1;
+    app->code_pick[0] = '\0';
     if (app->prefs_path[0] == '\0') {
         return;
     }
@@ -1115,7 +1166,7 @@ static void load_prefs(struct App *app) {
     if (f == NULL) {
         return;
     }
-    char line[64];
+    char line[96];
     while (fgets(line, (int)sizeof line, f) != NULL) {
         int value = 0;
         if (sscanf(line, "step=%d", &value) == 1) {
@@ -1140,6 +1191,22 @@ static void load_prefs(struct App *app) {
             page_set_sections(value);
         } else if (sscanf(line, "bar=%d", &value) == 1) {
             page_set_bar(value);
+        } else if (strncmp(line, "code=", 5) == 0) {
+            char *v = line + 5;
+            size_t n = strlen(v);
+            while (n > 0 && (v[n - 1] == '\n' || v[n - 1] == '\r')) {
+                v[--n] = '\0';
+            }
+            if (strcmp(v, "text") == 0) {
+                app->code_mode = 0;
+            } else if (strcmp(v, "liberation") == 0) {
+                app->code_mode = 1;
+            } else if (strcmp(v, "sys") == 0) {
+                app->code_mode = 2;
+            } else if (strncmp(v, "pick:", 5) == 0 && v[5] != '\0') {
+                app->code_mode = 3;
+                snprintf(app->code_pick, sizeof app->code_pick, "%s", v + 5);
+            }
         }
     }
     fclose(f);
@@ -3026,6 +3093,8 @@ static int on_input(struct android_app *android, AInputEvent *event) {
                         break;
                     }
                 }
+            } else if (hit == CHROME_CODEFONT) {
+                cycle_code_font(app);
             } else if (hit == CHROME_FONTFILE) {
                 pick_file(app, 3);
             } else if (hit == CHROME_GETFACES) {
@@ -4321,11 +4390,343 @@ static void load_style_files(struct App *app, const char *regular) {
     load_one_style(app, 2, italic_name);
 }
 
+enum { CODE_OPT_MAX = 8 };
+
+struct CodeOpt {
+    int mode;
+    int pick;
+};
+
+static char fold_ascii(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+static int fold_at(const char *s, const char *needle) {
+    size_t n = 0;
+    size_t i = 0;
+    if (s == NULL || needle == NULL) {
+        return -1;
+    }
+    n = strlen(needle);
+    if (n == 0) {
+        return -1;
+    }
+    for (i = 0; s[i] != '\0'; i++) {
+        size_t k = 0;
+        while (k < n && s[i + k] != '\0' && fold_ascii(s[i + k]) == needle[k]) {
+            k++;
+        }
+        if (k == n) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int ascii_letter(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static int looks_mono_name(const char *name) {
+    int at = 0;
+    if (name == NULL || name[0] == '\0') {
+        return 0;
+    }
+    if (fold_at(name, "mono") >= 0 || fold_at(name, "inconsolata") >= 0 || fold_at(name, "monaspace") >= 0) {
+        return 1;
+    }
+    while (name[at] != '\0') {
+        int hit = fold_at(name + at, "code");
+        if (hit < 0) {
+            break;
+        }
+        if (at + hit == 0 || !ascii_letter(name[at + hit - 1])) {
+            return 1;
+        }
+        at += hit + 4;
+    }
+    return 0;
+}
+
+static int mono_weight_skip(const char *name) {
+    return fold_at(name, "bold") >= 0 || fold_at(name, "italic") >= 0 || fold_at(name, "medium") >= 0 ||
+           fold_at(name, "light") >= 0 || fold_at(name, "thin") >= 0 || fold_at(name, "black") >= 0;
+}
+
+static void mono_stem(const char *path, char *out, size_t cap) {
+    const char *base = path;
+    const char *slash = NULL;
+    size_t n = 0;
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    slash = strrchr(path, '/');
+    if (slash != NULL) {
+        base = slash + 1;
+    }
+    n = strlen(base);
+    if (n > 4 && strcmp(base + n - 4, ".ttf") == 0) {
+        n -= 4;
+    }
+    if (n > 8 && strncmp(base + n - 8, "-Regular", 8) == 0) {
+        n -= 8;
+    }
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
+static void find_system_mono(struct App *app) {
+    static const char *known[] = {"/system/fonts/RobotoMono-Regular.ttf", "/system/fonts/DroidSansMono.ttf",
+                                  "/system/fonts/NotoSansMono-Regular.ttf", "/system/fonts/CutiveMono.ttf"};
+    DIR *dir = NULL;
+    struct dirent *ent = NULL;
+    char fallback[512];
+    int i = 0;
+    if (app == NULL || app->code_sys[0] != '\0' || app->code_sys_tried) {
+        return;
+    }
+    app->code_sys_tried = 1;
+    /* shortcut: a .ttc collection is skipped, upgrade if a phone ships mono only that way. */
+    for (i = 0; i < 4; i++) {
+        if (file_is_ttf(known[i])) {
+            snprintf(app->code_sys, sizeof app->code_sys, "%s", known[i]);
+            return;
+        }
+    }
+    fallback[0] = '\0';
+    dir = opendir("/system/fonts");
+    if (dir == NULL) {
+        return;
+    }
+    while ((ent = readdir(dir)) != NULL) {
+        size_t n = 0;
+        char path[512];
+        int wrote = 0;
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        n = strlen(ent->d_name);
+        if (n < 5 || strcmp(ent->d_name + n - 4, ".ttf") != 0) {
+            continue;
+        }
+        if (!looks_mono_name(ent->d_name) || mono_weight_skip(ent->d_name)) {
+            continue;
+        }
+        wrote = snprintf(path, sizeof path, "/system/fonts/%s", ent->d_name);
+        if (wrote < 0 || (size_t)wrote >= sizeof path || !file_is_ttf(path)) {
+            continue;
+        }
+        if (fold_at(ent->d_name, "regular") >= 0) {
+            snprintf(app->code_sys, sizeof app->code_sys, "%s", path);
+            closedir(dir);
+            return;
+        }
+        if (fallback[0] == '\0') {
+            snprintf(fallback, sizeof fallback, "%s", path);
+        }
+    }
+    closedir(dir);
+    if (fallback[0] != '\0') {
+        snprintf(app->code_sys, sizeof app->code_sys, "%s", fallback);
+    }
+}
+
+static void drop_code_buf(struct App *app) {
+    free(app->code_ttf);
+    app->code_ttf = NULL;
+    app->code_len = 0;
+}
+
+static int code_take(struct App *app, unsigned char *buf, int len) {
+    if (buf == NULL || page_set_mono(buf, len) != 0) {
+        free(buf);
+        drop_code_buf(app);
+        page_set_mono(NULL, 0);
+        return -1;
+    }
+    if (buf != app->code_ttf) {
+        free(app->code_ttf);
+        app->code_ttf = buf;
+        app->code_len = len;
+    }
+    return 0;
+}
+
+static int load_picked_mono(struct App *app) {
+    char dir[512];
+    char ttf[576];
+    int i = 0;
+    int wrote = 0;
+    int len = 0;
+    unsigned char *buf = NULL;
+    if (app->code_pick[0] == '\0' || data_join(app, "picked", dir, sizeof dir) != 0) {
+        return -1;
+    }
+    for (i = 0; i < app->picked_n && i < PICKED_MAX; i++) {
+        if (strcmp(app->picked_name[i], app->code_pick) != 0) {
+            continue;
+        }
+        wrote = snprintf(ttf, sizeof ttf, "%s/%d.ttf", dir, app->picked_slot[i]);
+        if (wrote < 0 || (size_t)wrote >= sizeof ttf) {
+            return -1;
+        }
+        buf = load_path(ttf, &len);
+        return code_take(app, buf, len);
+    }
+    return -1;
+}
+
+static int code_options(struct App *app, struct CodeOpt *opt, int cap) {
+    int n = 0;
+    int i = 0;
+    if (opt == NULL || cap < 1) {
+        return 0;
+    }
+    opt[n].mode = 0;
+    opt[n].pick = -1;
+    n++;
+    if (app->got_face[2] && n < cap) {
+        opt[n].mode = 1;
+        opt[n].pick = -1;
+        n++;
+    }
+    find_system_mono(app);
+    if (app->code_sys[0] != '\0' && n < cap) {
+        opt[n].mode = 2;
+        opt[n].pick = -1;
+        n++;
+    }
+    for (i = 0; i < app->picked_n && i < PICKED_MAX && n < cap; i++) {
+        if (!looks_mono_name(app->picked_name[i])) {
+            continue;
+        }
+        opt[n].mode = 3;
+        opt[n].pick = i;
+        n++;
+    }
+    return n;
+}
+
+static void apply_code_font(struct App *app) {
+    int len = 0;
+    unsigned char *buf = NULL;
+    if (app->code_mode < 0) {
+        if (app->got_face[2]) {
+            app->code_mode = 1;
+        } else {
+            find_system_mono(app);
+            app->code_mode = app->code_sys[0] != '\0' ? 2 : 0;
+        }
+    }
+    if (app->code_mode == 1) {
+        drop_code_buf(app);
+        if (app->got_face[2]) {
+            page_set_mono(app->fonts[2], app->font_lens[2]);
+        } else {
+            page_set_mono(NULL, 0);
+        }
+        return;
+    }
+    if (app->code_mode == 2) {
+        find_system_mono(app);
+        buf = app->code_sys[0] != '\0' ? load_path(app->code_sys, &len) : NULL;
+        if (code_take(app, buf, len) != 0) {
+            page_set_mono(NULL, 0);
+        }
+        return;
+    }
+    if (app->code_mode == 3) {
+        if (load_picked_mono(app) != 0) {
+            drop_code_buf(app);
+            page_set_mono(NULL, 0);
+        }
+        return;
+    }
+    drop_code_buf(app);
+    app->code_mode = 0;
+    page_set_mono(NULL, 0);
+}
+
+static void cycle_code_font(struct App *app) {
+    struct CodeOpt opt[CODE_OPT_MAX];
+    int n = 0;
+    int cur = -1;
+    int next = 0;
+    int i = 0;
+    n = code_options(app, opt, CODE_OPT_MAX);
+    if (n < 1) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        if (opt[i].mode != app->code_mode) {
+            continue;
+        }
+        if (opt[i].mode == 3) {
+            if (opt[i].pick < 0 || opt[i].pick >= app->picked_n) {
+                continue;
+            }
+            if (strcmp(app->picked_name[opt[i].pick], app->code_pick) != 0) {
+                continue;
+            }
+        }
+        cur = i;
+        break;
+    }
+    next = cur < 0 ? 0 : (cur + 1) % n;
+    app->code_mode = opt[next].mode;
+    app->code_pick[0] = '\0';
+    if (opt[next].mode == 3 && opt[next].pick >= 0 && opt[next].pick < app->picked_n) {
+        snprintf(app->code_pick, sizeof app->code_pick, "%s", app->picked_name[opt[next].pick]);
+    }
+    apply_code_font(app);
+}
+
+static void code_row_label(const struct App *app, char *out, size_t cap) {
+    char stem[64];
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (app == NULL) {
+        return;
+    }
+    if (app->code_mode == 1) {
+        snprintf(out, cap, "Code Liberation");
+        return;
+    }
+    if (app->code_mode == 2) {
+        mono_stem(app->code_sys, stem, sizeof stem);
+        if (stem[0] != '\0') {
+            snprintf(out, cap, "Code %s", stem);
+        } else {
+            snprintf(out, cap, "Code system");
+        }
+        return;
+    }
+    if (app->code_mode == 3 && app->code_pick[0] != '\0') {
+        snprintf(out, cap, "Code %s", app->code_pick);
+        return;
+    }
+    snprintf(out, cap, "Code text");
+}
+
 static void use_loaded_face(struct App *app) {
     if (app->face == 4 && apply_catalog_font(app) >= 0) {
+        apply_code_font(app);
         return;
     }
     if (app->face == 3 && apply_custom_font(app) == 0) {
+        apply_code_font(app);
         return;
     }
     if (app->face < 0 || app->face > 2) {
@@ -4334,6 +4735,7 @@ static void use_loaded_face(struct App *app) {
     if (app->got_face[app->face] && page_set_font(app->fonts[app->face], app->font_lens[app->face]) == 0) {
         app->system_font = 0;
         load_style_files(app, k_face_file[app->face]);
+        apply_code_font(app);
         return;
     }
     for (int i = 0; i < 3; i++) {
@@ -4341,12 +4743,14 @@ static void use_loaded_face(struct App *app) {
             app->face = i;
             app->system_font = 0;
             load_style_files(app, k_face_file[i]);
+            apply_code_font(app);
             return;
         }
     }
     if (load_system_face(app) != 0) {
         LOGE("font failed");
     }
+    apply_code_font(app);
 }
 
 static void load_font_list(struct App *app) {

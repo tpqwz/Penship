@@ -77,7 +77,33 @@ int main(void) {
         has(more, "<pre><code>one\n\ntwo\n</code></pre>", "a blank line stays in the indented block");
         free(more);
     }
+    {
+        char *bare = NULL;
+        size_t bare_n = 0;
+        const char *line =
+            "See https://bare.example/a. and www.bare.example/a. and (https://bare.example/b).\n"
+            "Write me@penship.app and hello+xyz@mail.example and hello@mail+xyz.example.\n";
+        expect(html_export(line, strlen(line), &bare, &bare_n) == 0, "bare address export");
+        has(bare, "href=\"https://bare.example/a\"", "a bare https address");
+        has(bare, "href=\"http://www.bare.example/a\"", "a www address");
+        has(bare, ">www.bare.example/a</a>.", "the period stays after the www address");
+        has(bare, "href=\"https://bare.example/b\"", "a wrapped address");
+        expect(bare != NULL && strstr(bare, "href=\"https://bare.example/b)\"") == NULL, "the wrapping paren stays outside");
+        has(bare, "href=\"mailto:me@penship.app\"", "a bare email");
+        has(bare, "href=\"mailto:hello+xyz@mail.example\"", "a plus before the at");
+        expect(bare != NULL && strstr(bare, "mailto:hello@mail+xyz.example") == NULL, "a plus after the at stays text");
+        free(bare);
+    }
     expect(strstr(html, "---") == NULL, "the delimiter row is not a body row");
+    {
+        char *math = NULL;
+        size_t math_n = 0;
+        const char *note = "$$\nx^2\n$$\n\nSee $a_i$ now.\n";
+        expect(html_export(note, strlen(note), &math, &math_n) == 0, "math export");
+        has(math, "<math display=\"block\"><msup>", "a dollar fence becomes MathML");
+        has(math, "<msub>", "inline math becomes MathML");
+        free(math);
+    }
     free(html);
     if (fail) {
         return 1;

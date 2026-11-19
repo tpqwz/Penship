@@ -198,6 +198,47 @@ static void test_link_url(void) {
     expect(strcmp(url, "https://penship.app") == 0, "the address is the https target");
     expect(page_link_url(text, strlen(text), 0, url, sizeof url) == -1, "the words before the link are not a link");
     expect(page_link_url("Go [x](file://etc) ", 18, 4, url, sizeof url) == -1, "a file address stays in the note");
+    {
+        const char *bare = "See https://penship.app now\n";
+        const char *dot = "See https://penship.app. now\n";
+        const char *www = "www.penship.app.\n";
+        const char *angle = "<https://penship.app>\n";
+        const char *wrapped = "(https://penship.app/a_(b))\n";
+        const char *entity = "www.google.com/search?q=commonmark&hl;\n";
+        expect(page_link_url(bare, strlen(bare), 4, url, sizeof url) == 0, "a bare https address opens");
+        expect(strcmp(url, "https://penship.app") == 0, "the bare address drops nothing");
+        expect(page_link_url(dot, strlen(dot), 4, url, sizeof url) == 0, "a bare address ends before the period");
+        expect(strcmp(url, "https://penship.app") == 0, "the period stays outside");
+        expect(page_link_url(www, strlen(www), 0, url, sizeof url) == 0, "a www address opens");
+        expect(strcmp(url, "http://www.penship.app") == 0, "www takes an http prefix");
+        expect(page_link_url(angle, strlen(angle), 1, url, sizeof url) == 0, "an angle address opens");
+        expect(strcmp(url, "https://penship.app") == 0, "the angle brackets stay outside");
+        expect(page_link_url(wrapped, strlen(wrapped), 1, url, sizeof url) == 0, "a wrapped address keeps its own paren");
+        expect(strcmp(url, "https://penship.app/a_(b)") == 0, "the wrapping paren stays outside");
+        expect(page_link_url(entity, strlen(entity), 0, url, sizeof url) == 0, "an entity is not part of the address");
+        expect(strcmp(url, "http://www.google.com/search?q=commonmark") == 0, "the entity is dropped");
+        expect(page_link_url("notwww.penship.app\n", strlen("notwww.penship.app\n"), 0, url, sizeof url) == -1,
+               "www inside a word stays text");
+        expect(page_link_url("www.nope\n", strlen("www.nope\n"), 0, url, sizeof url) == -1, "www without a second dot stays text");
+        {
+            const char *mail = "me@penship.app\n";
+            const char *plus = "hello+xyz@mail.example\n";
+            const char *bad = "hello@mail+xyz.example\n";
+            const char *dot = "a.b-c_d@a.b.\n";
+            const char *dash = "a.b-c_d@a.b-\n";
+            const char *angle_mail = "<me@penship.app>\n";
+            expect(page_link_url(mail, strlen(mail), 0, url, sizeof url) == 0, "a bare email opens");
+            expect(strcmp(url, "mailto:me@penship.app") == 0, "a bare email takes mailto");
+            expect(page_link_url(plus, strlen(plus), 0, url, sizeof url) == 0, "a plus before the at opens");
+            expect(strcmp(url, "mailto:hello+xyz@mail.example") == 0, "the plus stays in the local part");
+            expect(page_link_url(bad, strlen(bad), 0, url, sizeof url) == -1, "a plus after the at stays text");
+            expect(page_link_url(dot, strlen(dot), 0, url, sizeof url) == 0, "a trailing dot stays outside the email");
+            expect(strcmp(url, "mailto:a.b-c_d@a.b") == 0, "the email keeps the name before the dot");
+            expect(page_link_url(dash, strlen(dash), 0, url, sizeof url) == -1, "an email ending in a dash stays text");
+            expect(page_link_url(angle_mail, strlen(angle_mail), 1, url, sizeof url) == 0, "an angle email opens");
+            expect(strcmp(url, "mailto:me@penship.app") == 0, "an angle email takes mailto");
+        }
+    }
 }
 
 static void test_word_wrap(const unsigned char *font, int font_len) {
@@ -1065,6 +1106,21 @@ static void test_rendered(const unsigned char *font, int font_len) {
     const char *mail = "<me@penship.app>\nZ";
     page_draw(px, width, height, 0, 0, width, height, mail, strlen(mail), strlen(mail), strlen(mail), font_px);
     expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "an email autolink is a link");
+    const char *bare_url = "https://penship.app\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bare_url, strlen(bare_url), strlen(bare_url), strlen(bare_url),
+              font_px);
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "a bare https address is a link");
+    const char *nowww = "www.nope\nZ";
+    page_draw(px, width, height, 0, 0, width, height, nowww, strlen(nowww), strlen(nowww), strlen(nowww), font_px);
+    expect(!near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "www without a second dot stays text");
+    const char *bare_mail = "me@penship.app\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bare_mail, strlen(bare_mail), strlen(bare_mail), strlen(bare_mail),
+              font_px);
+    expect(near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "a bare email is a link");
+    const char *bad_mail = "hello@mail+xyz.example\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bad_mail, strlen(bad_mail), strlen(bad_mail), strlen(bad_mail),
+              font_px);
+    expect(!near_rgb(px, width, height, PAGE_LINK_R, PAGE_LINK_G, PAGE_LINK_B), "a plus after the at is not a link");
     page_set_editing(0);
     free(px);
 }
@@ -1419,6 +1475,130 @@ static void test_picture(const unsigned char *font, int font_len) {
     }
 }
 
+static int widest_ink(const uint8_t *px, int width, int height) {
+    int best = 0;
+    int y = 0;
+    for (y = 0; y < height; y++) {
+        int run = 0;
+        int x = 0;
+        for (x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int ink = p[0] < 80 && p[1] < 80 && p[2] < 80;
+            if (ink) {
+                run++;
+                if (run > best) {
+                    best = run;
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+    return best;
+}
+
+static unsigned char *load_named(const char *path, int *len) {
+    FILE *file = fopen(path, "rb");
+    long size = 0;
+    unsigned char *bytes = NULL;
+    expect(file != NULL, "open named font");
+    if (file == NULL) {
+        return NULL;
+    }
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    bytes = malloc((size_t)size);
+    expect(bytes != NULL && size > 0 && fread(bytes, 1, (size_t)size, file) == (size_t)size, "read named font");
+    fclose(file);
+    *len = (int)size;
+    return bytes;
+}
+
+static int caret_x_at(const char *text, size_t caret) {
+    const int width = 640;
+    const int height = 240;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    int x = 0;
+    int y = 0;
+    int h = 0;
+    expect(px != NULL, "code font buffer");
+    if (px == NULL) {
+        return -1;
+    }
+    page_scroll_place(0.f);
+    page_draw(px, width, height, 0, 0, width, height, text, strlen(text), caret, caret, 32);
+    expect(page_caret_box(&x, &y, &h) == 0, "code caret box");
+    free(px);
+    return x;
+}
+
+static void test_code_font(const unsigned char *font, int font_len) {
+    int mono_len = 0;
+    unsigned char *mono = NULL;
+    int was_edit = page_editing();
+    int was_source = page_source();
+    int xi = 0;
+    int xm = 0;
+    int fi = 0;
+    int fm = 0;
+    int gap = 0;
+    expect(page_set_font(font, font_len) == 0, "code body font");
+    page_set_mono(NULL, 0);
+    page_set_editing(1);
+    page_set_source(0);
+    page_set_follow(0);
+    xi = caret_x_at("`i`", 2);
+    xm = caret_x_at("`m`", 2);
+    expect(xm > xi + 1, "sans gives m a wider code span than i");
+    fi = caret_x_at("```\ni\n```\n", 5);
+    fm = caret_x_at("```\nm\n```\n", 5);
+    expect(fm > fi + 1, "sans gives m a wider fence than i");
+    mono = load_named("assets/LiberationMono-Regular.ttf", &mono_len);
+    expect(mono != NULL && page_set_mono(mono, mono_len) == 0 && page_mono() == 1, "mono face loads");
+    if (mono != NULL && page_mono()) {
+        xi = caret_x_at("`i`", 2);
+        xm = caret_x_at("`m`", 2);
+        gap = xm - xi;
+        if (gap < 0) {
+            gap = -gap;
+        }
+        expect(gap <= 1, "mono gives i and m the same code span");
+        fi = caret_x_at("```\ni\n```\n", 5);
+        fm = caret_x_at("```\nm\n```\n", 5);
+        gap = fm - fi;
+        if (gap < 0) {
+            gap = -gap;
+        }
+        expect(gap <= 1, "a fence uses the mono face");
+    }
+    page_set_mono(NULL, 0);
+    expect(page_mono() == 0, "clearing mono leaves code on the body face");
+    page_set_editing(was_edit);
+    page_set_source(was_source);
+    free(mono);
+}
+
+static void test_math(const unsigned char *font, int font_len) {
+    const int width = 480;
+    const int height = 360;
+    const char *text = "$$\n\\frac{12}{3}\n$$\n";
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    int was = page_editing();
+    expect(page_set_font(font, font_len) == 0, "math font");
+    expect(px != NULL, "math buffer");
+    if (px == NULL) {
+        return;
+    }
+    page_set_editing(0);
+    page_set_source(0);
+    page_scroll_place(0.f);
+    page_draw(px, width, height, 0, 0, width, height, text, strlen(text), 0, 0, 32);
+    expect(widest_ink(px, width, height) >= 24, "a fraction draws a bar");
+    page_set_editing(was);
+    free(px);
+}
+
 int main(void) {
     test_plate();
     test_heads();
@@ -1428,6 +1608,7 @@ int main(void) {
     unsigned char *font = load_font(&font_len);
     if (font != NULL) {
         test_picture(font, font_len);
+        test_math(font, font_len);
         test_caret_and_glyph(font, font_len);
         test_hit(font, font_len);
         test_link_url();
@@ -1443,6 +1624,7 @@ int main(void) {
         test_selection_paint(font, font_len);
         test_tall_note(font, font_len);
         test_scroll(font, font_len);
+        test_code_font(font, font_len);
         free(font);
     }
     if (fail) {

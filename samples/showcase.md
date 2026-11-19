@@ -66,7 +66,7 @@ A link shows its words, as in [the Penship note](https://penship.app), and hides
 - [x] Hide inline code ticks, link addresses, and image addresses off the caret line.
 - [x] Put Smaller, Larger, Font, Typewriter, Focus, Theme, and Source in a Settings view.
 - [x] Export HTML from this same buffer.
-- [ ] Draw math.
+- [x] Draw math.
 
 ## A quotation
 
@@ -95,7 +95,7 @@ The line above this paragraph is a thematic break, three dashes on their own lin
 | Quote | a greater-than mark | a bar |
 | Rule | three dashes, stars, or underscores | a bar |
 | Table | a header, a delimiter, then rows | a grid |
-| Math | dollar fences | not yet |
+| Math | dollar fences | drawn |
 
 Qty-style numbers sit on the right. A centered column uses colons on both sides of the dashes. A left column uses plain dashes. Tab moves between cells. Tab on the last cell adds an empty row. Shift+Tab moves back.
 
@@ -131,6 +131,7 @@ Settings is its own screen. The format bar stays on the page. Settings opens thi
 
 - Smaller and Larger step the type size from 14 to 32 sp.
 - Font cycles the three Liberation faces: sans, then serif, then mono.
+- Code font is the face for ticks and fences. It cycles the note's face, Liberation Mono, a monospace face from the phone, and a downloaded monospace face. The row names the one in use.
 - Font file asks for a TrueType file. If the file loads, it becomes the face and it is remembered. A file the painter cannot read leaves the current face alone. Font lists shows each file face first. A tap on one uses that file again. The rows under those are faces to fetch.
 - Typewriter keeps the caret line in the vertical middle.
 - Focus dims every line except the one you are on.
@@ -139,6 +140,7 @@ Settings is its own screen. The format bar stays on the page. Settings opens thi
 - Theme switches the day paper and the night paper.
 - Source shows every mark, on every line, and leaves Read only.
 - Read only paints the whole note and ignores typing, backspace, and the format row.
+- Typewriter, Focus, Line, Sections, Source, and Read only say on or off. Theme says day or night. The word changes when you tap the row, and it is the same word the next time Settings opens.
 - The menu mark closes the list and returns to the note. Back closes Contents, then the menu, then the keyboard, and it does not leave the note.
 
 Ctrl+Shift+T, Ctrl+Shift+F, Ctrl+Shift+P, and Ctrl+Shift+S still flip Typewriter, Focus, Theme, and Source when those keys reach the editor.
@@ -163,21 +165,31 @@ Find is in the menu. The keys you type go into the query, not the note, and the 
 
 A backslash before punctuation shows that character and hides the slash when the caret is on another line. \*stars\* are not emphasis. The slash comes back when you step onto the line.
 
-An address in angle brackets is a link, as in <https://penship.app>, and so is <me@penship.app>. The brackets hide off the caret line. Nothing is fetched.
+An address in angle brackets is a link, as in <https://penship.app>, and so is <me@penship.app>. The brackets hide off the caret line. https://penship.app, www.penship.app, and me@penship.app are links without brackets. A later tap opens an http address or a mail address. Nothing is fetched.
 
 ## Still ahead
 
-Math would wait for a real renderer. Export in the menu writes HTML from this same buffer. An image becomes an img tag with its alt text and path. An underlined title, underscores, a reference, an address in angle brackets, and an indented code block are kept too. AsciiDoc, MyST, and Typst would be compilers beside this painter, not a second syntax invented here.
+Export in the menu writes HTML from this same buffer. An image becomes an img tag with its alt text and path. An underlined title, underscores, a reference, an address in angle brackets, an indented code block, and a dollar fence as MathML are kept too. AsciiDoc, MyST, and Typst would be compilers beside this painter, not a second syntax invented here.
 
 Until then, this note grows in place. The next feature appends a section rather than starting a new file.
 
 ## Pictures
 
-An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. A grayscale, palette, 16-bit, or interlaced PNG is drawn the same way. A progressive JPEG is drawn the same way. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
+An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. A grayscale, palette, 16-bit, or interlaced PNG is drawn the same way. A progressive JPEG, an arithmetic JPEG, and a CMYK JPEG are drawn the same way. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
 
 ![the ship Endeavour](https://commons.wikimedia.org/wiki/Special:FilePath/Endeavour.png)
 
 Inside a sentence the same file is drawn small, in place of the alt text. A missing file leaves the words. Any other web address is not fetched. On the caret line the marks stay visible, so the path can be changed.
+
+## Math
+
+A dollar fence is drawn when the caret is on another line. Step onto the fence and the source comes back.
+
+$$
+x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}
+$$
+
+Inside a sentence, $a^2+b^2=c^2$ uses the same renderer, fitted to the line. Letters, scripts, fractions, roots, and named symbols are drawn. A formula outside that subset stays as the source you typed.
 
 ## A longer stretch, for scrolling
 
@@ -193,9 +205,9 @@ Four. A drag that starts on the caret selects. Press and hold, then drag, select
 
 Five. Copy and paste go through the Android clipboard. A clip longer than a mebibyte is ignored, so a huge paste cannot replace the note by accident. Cut copies first and deletes only when the copy succeeded. In Read only, Cut and Paste are not on the menu. The words can still be copied. Undo is refused there too, because undo is an edit.
 
-Six. The menu is the file: Open, Save, Save as, Export, Contents, Find, and Settings. Settings is the other screen: Smaller, Larger, Font, Typewriter, Focus, Line, Theme, Source, and Read only. The labels are large enough to read on a phone, and each row is at least a thumb tall. If the keyboard would cover the bottom of the list, the list scrolls. Opening the menu hides the keyboard. The menu mark closes the list and returns to the note. Back closes Contents, then Settings, then the menu, then the keyboard, and stays in Penship.
+Six. The menu is the file: Open, Save, Save as, Export, Contents, Find, and Settings. Settings is the other screen: Smaller, Larger, Font, Code font, Typewriter, Focus, Line, Theme, Source, and Read only. A mode row says on or off, and Theme says day or night. The labels are large enough to read on a phone, and each row is at least a thumb tall. If the keyboard would cover the bottom of the list, the list scrolls. Opening the menu hides the keyboard. The menu mark closes the list and returns to the note. Back closes Contents, then Settings, then the menu, then the keyboard, and stays in Penship.
 
-Seven. That menu opens Open, Save, Save as, Export, and Contents, and the same options on a phone and on a wide window. Save writes the open file. If the note is still the private scratch file, or the open file cannot be written, Save asks the system for a place. Save as always asks, and the note becomes the file you pick. Export writes HTML from this buffer and does not replace the markdown you are editing. That copy keeps an underlined title, underscore emphasis, a reference link, an angle-bracket address, an indented code block, and an image's alt text and path. Contents lists the headings outside fences, up to sixty-four of them, and a tap moves the caret to that heading.
+Seven. That menu opens Open, Save, Save as, Export, and Contents, and the same options on a phone and on a wide window. Save writes the open file. If the note is still the private scratch file, or the open file cannot be written, Save asks the system for a place. Save as always asks, and the note becomes the file you pick. Export writes HTML from this buffer and does not replace the markdown you are editing. That copy keeps an underlined title, underscore emphasis, a reference link, an angle-bracket address, an indented code block, an image's alt text and path, and a dollar fence as MathML. Contents lists the headings outside fences, up to sixty-four of them, and a tap moves the caret to that heading.
 
 Eight. Open with offers Penship for text and for the markdown names it knows. A share can hand over a file or a piece of text. A read-only open falls back to a private copy, so a file the system will not let you write is not quietly discarded. The edits of that session live in the copy. The original stays where the other app left it.
 
@@ -243,7 +255,7 @@ The list is the errand. Milk. A battery. The name of the street the shop is on. 
 
 A table is for the two columns that do not belong in a list. Name, and whether you have it. The header is a heading color when you are not on that line. The grid is rules. Tab moves between the cells. On the last cell it adds a row, which is how the list grows without you typing the pipes by hand. The grid stays up while you edit. The caret sits in the cell you tapped. Enter moves to the same column on the next row, and on the last row it adds one. The table mark adds a column after that cell. Hold the mark and the column goes away. It will not remove the last one.
 
-Code is for the command you will forget. One pair of ticks for a word in a sentence. A fence for the three lines you want to keep together. The wash marks the fence even when the ticks are hidden. The fence opens as one block, from the opener through the close, so the ticks stay while you change any line inside it.
+Code is for the command you will forget. One pair of ticks for a word in a sentence. A fence for the three lines you want to keep together. The wash marks the fence even when the ticks are hidden. The fence opens as one block, from the opener through the close, so the ticks stay while you change any line inside it. Ticks and fences use the Code font from Settings when that face is monospace.
 
 A link shows its words, and the address waits on the caret line. The first tap puts the caret there. A later tap on that same http or https address opens it. An image is the same shape with an exclamation mark. On its own line, the file is the picture. A PNG or a JPEG on Wikimedia Commons is fetched once. The alt text is what remains when the file is not there.
 
@@ -257,4 +269,4 @@ Saving is dull, which is what you want from it. The file is the buffer. Save wri
 
 If this passage is long enough, the top of the file is off the screen while you read this sentence. Drag down to return. The caret stays unless you tap. Tap a heading in Contents if you would rather jump. The word count, when you open the menu, includes the words of this passage and the words of the sections above. It does not include the marks. It is a count of the note, not of the syntax.
 
-What is still missing is stated once, up in Still ahead, and it can stay there. Math and the other languages are not given a fake section here. Pictures are drawn. This file grows when a mark starts working. Until then the page should be long enough to scroll, specific enough to test, and ordinary enough to read. That is the sample.
+What is still missing is stated once, up in Still ahead, and it can stay there. Math has its section above. The other languages do not get one here. Pictures are drawn. This file grows when a mark starts working. Until then the page should be long enough to scroll, specific enough to test, and ordinary enough to read. That is the sample.

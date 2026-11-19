@@ -263,12 +263,35 @@ public class Pen extends android.app.NativeActivity {
             "LiberationMono-Italic.ttf"};
     private static volatile boolean fetching;
 
-    /** Open an http(s) address from the note. A link that is not http(s) stays in the editor. */
+    /** Open an http(s) address or a mailto address from the note. Anything else stays in the editor. */
+    private static boolean mailTo(String url) {
+        int at;
+        int i;
+        if (!url.startsWith("mailto:")) {
+            return false;
+        }
+        at = url.indexOf('@');
+        if (at < 8 || url.indexOf('@', at + 1) >= 0 || url.indexOf('.', at + 1) < 0) {
+            return false;
+        }
+        for (i = 7; i < url.length(); i++) {
+            char c = url.charAt(i);
+            if (c == '@' || c == '.' || c == '-' || c == '_' || c == '+') {
+                continue;
+            }
+            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
     public static void openLink(Activity activity, String url) {
         if (activity == null || url == null) {
             return;
         }
-        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+        if (!url.startsWith("https://") && !url.startsWith("http://") && !mailTo(url)) {
             return;
         }
         if (url.indexOf(' ') >= 0 || url.indexOf('\n') >= 0 || url.indexOf('\r') >= 0) {

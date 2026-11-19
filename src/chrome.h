@@ -38,7 +38,8 @@ enum {
     CHROME_BAR = 33,
     CHROME_GETFACES = 34,
     CHROME_LISTS = 35,
-    CHROME_COUNT = 36
+    CHROME_CODEFONT = 36,
+    CHROME_COUNT = 37
 };
 
 struct Chrome {
@@ -81,6 +82,10 @@ int chrome_stack(int *ys, int *hs, int n, int top, int bottom, int row_h, int *s
 int chrome_hit(const struct Chrome *chrome, int x, int y);
 
 const char *chrome_label(int index);
+
+/* The row's current state, or NULL when the row is not a switch.
+   Theme uses 0 for day. Any other value is night. The other switches use 0 for off. */
+const char *chrome_state_label(int index, int on);
 
 /* Document text size in pixels for a density and a step from 0 through 6. */
 int text_px(int density, int step);

@@ -1,5 +1,7 @@
 #include "page.h"
 
+#include "linkurl.h"
+#include "mdmath.h"
 #include "utf8.h"
 
 #include <limits.h>
@@ -19,6 +21,10 @@ static stbtt_fontinfo g_font;
 static int g_font_ok;
 static stbtt_fontinfo g_style[2];
 static int g_style_ok[2];
+static stbtt_fontinfo g_mono;
+static int g_mono_ok;
+static int g_mono_stamp;
+static int g_em_px;
 static int g_typewriter;
 static int g_focus;
 static int g_line_hl;
@@ -512,6 +518,26 @@ int page_set_style(int which, const unsigned char *ttf, int len) {
     return 0;
 }
 
+int page_set_mono(const unsigned char *ttf, int len) {
+    int offset = 0;
+    g_mono_ok = 0;
+    g_mono_stamp++;
+    glyph_cache_clear();
+    if (ttf == NULL || len <= 0) {
+        return 0;
+    }
+    offset = stbtt_GetFontOffsetForIndex(ttf, 0);
+    if (offset < 0 || !stbtt_InitFont(&g_mono, ttf, offset)) {
+        return -1;
+    }
+    g_mono_ok = 1;
+    return 0;
+}
+
+int page_mono(void) {
+    return g_mono_ok;
+}
+
 int page_margin(int font_px) {
     /* The minor of the em. One em of margin is the major; this is the rest. */
     int margin = font_px * 1000 / 1618;
@@ -647,7 +673,8 @@ static void solid_bar(uint8_t *px, int width, int height, int x, int y, int w, i
 }
 
 enum { KIND_BODY = 0, KIND_HEAD = 1, KIND_EM = 2, KIND_CODE = 3, KIND_LINK = 4, KIND_LIST = 5, KIND_QUOTE = 6,
-       KIND_STRIKE = 7, KIND_RULE = 8, KIND_TABLE = 9, KIND_IMAGE = 10, KIND_SKIP = 11, KIND_STRONG = 12 };
+       KIND_STRIKE = 7, KIND_RULE = 8, KIND_TABLE = 9, KIND_IMAGE = 10, KIND_SKIP = 11, KIND_STRONG = 12,
+       KIND_MATH = 13 };
 
 static stbtt_fontinfo *style_font(int kind, int *face) {
     if (kind == KIND_STRONG && g_style_ok[0]) {
@@ -662,10 +689,31 @@ static stbtt_fontinfo *style_font(int kind, int *face) {
         }
         return &g_style[1];
     }
+    if (kind == KIND_CODE && g_mono_ok) {
+        if (face != NULL) {
+            *face = 3;
+        }
+        return &g_mono;
+    }
     if (face != NULL) {
         *face = 0;
     }
     return &g_font;
+}
+
+/* A mono face often has a different units-per-em. Match the body pixel height, and a heading's larger scale. */
+static float face_scale(const stbtt_fontinfo *font, float scale) {
+    float mono = 0.f;
+    float body = 0.f;
+    if (font != &g_mono || !g_mono_ok || g_em_px < 1) {
+        return scale;
+    }
+    mono = stbtt_ScaleForPixelHeight(&g_mono, (float)g_em_px);
+    body = stbtt_ScaleForPixelHeight(&g_font, (float)g_em_px);
+    if (!(body > 0.f) || !(scale > 0.f)) {
+        return mono;
+    }
+    return mono * (scale / body);
 }
 
 enum { TABLE_COLS = 8 };
@@ -1472,6 +1520,22 @@ static int can_close(const char *s, size_t n, size_t i, int len, char marker) {
     return 1;
 }
 
+static int math_fit(const char *s, size_t n, int line_h, int *px, int *w, int *asc, int *desc);
+
+/* A dollar that is not half of $$. */
+static int lone_dollar(const char *s, size_t n, size_t i) {
+    if (i >= n || s[i] != '$') {
+        return 0;
+    }
+    if (i > 0 && s[i - 1] == '$') {
+        return 0;
+    }
+    if (i + 1 < n && s[i + 1] == '$') {
+        return 0;
+    }
+    return 1;
+}
+
 /* A same-line * or _ pair. An underscore inside a word stays a word. A backslash before punctuation is literal.
    Inline marks are skipped on a line longer than 256 KiB. */
 static void mark_inline(const char *s, size_t n, uint8_t *mark) {
@@ -1502,6 +1566,27 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
             i = esc;
             continue;
         }
+        if (lone_dollar(s, n, i)) {
+            size_t j = i + 1;
+            int mp = 0;
+            int mw = 0;
+            int ma = 0;
+            int md = 0;
+            int fit_h = g_line_h > 0 ? g_line_h : 16;
+            while (j < n && !lone_dollar(s, n, j)) {
+                j++;
+            }
+            if (j < n && j > i + 1 && math_fit(s + i + 1, j - (i + 1), fit_h, &mp, &mw, &ma, &md) == 0) {
+                size_t k = 0;
+                mark[i] = KIND_SKIP;
+                for (k = i + 1; k < j; k++) {
+                    mark[k] = KIND_MATH;
+                }
+                mark[j] = KIND_SKIP;
+                i = j + 1;
+                continue;
+            }
+        }
         if (s[i] == '<' ) {
             size_t j = i + 1;
             int autolink = 0;
@@ -1531,6 +1616,32 @@ static void mark_inline(const char *s, size_t n, uint8_t *mark) {
                 }
                 mark[j] = KIND_SKIP;
                 i = j + 1;
+                continue;
+            }
+        }
+        {
+            size_t bare = 0;
+            int www = 0;
+            if (link_extended(s, n, i, &bare, &www)) {
+                size_t k = 0;
+                (void)www;
+                for (k = i; k < bare; k++) {
+                    mark[k] = KIND_LINK;
+                }
+                i = bare;
+                continue;
+            }
+        }
+        {
+            size_t bare = 0;
+            int scheme = 0;
+            if (link_email(s, n, i, &bare, &scheme)) {
+                size_t k = 0;
+                (void)scheme;
+                for (k = i; k < bare; k++) {
+                    mark[k] = KIND_LINK;
+                }
+                i = bare;
                 continue;
             }
         }
@@ -1857,6 +1968,150 @@ static void paint_caret_band(uint8_t *px, int width, int height, uint32_t row, u
     blend_rect(px, width, height, g_view_x, sy, g_view_w, line_h, sr, sg, sb, 18);
 }
 
+struct MathPaint {
+    uint8_t *px;
+    int width;
+    int height;
+    int max_x;
+    int r;
+    int g;
+    int b;
+};
+
+static int math_advance(void *user, unsigned cp, int px) {
+    float scale = 0.f;
+    int ax = 0;
+    int lsb = 0;
+    int adv = 0;
+    (void)user;
+    if (!g_font_ok || px < 1) {
+        return 1;
+    }
+    scale = stbtt_ScaleForPixelHeight(&g_font, (float)px);
+    stbtt_GetCodepointHMetrics(&g_font, (int)cp, &ax, &lsb);
+    adv = (int)(ax * scale + 0.5f);
+    if (adv < 1) {
+        adv = px / 2;
+    }
+    if (adv < 1) {
+        adv = 1;
+    }
+    return adv;
+}
+
+static int math_ascent_px(void *user, int px) {
+    int ascent = 0;
+    int descent = 0;
+    int gap = 0;
+    float scale = 0.f;
+    int h = 0;
+    (void)user;
+    if (!g_font_ok || px < 1) {
+        return 1;
+    }
+    scale = stbtt_ScaleForPixelHeight(&g_font, (float)px);
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
+    h = (int)(ascent * scale + 0.5f);
+    return h < 1 ? 1 : h;
+}
+
+static int math_descent_px(void *user, int px) {
+    int ascent = 0;
+    int descent = 0;
+    int gap = 0;
+    float scale = 0.f;
+    int h = 0;
+    (void)user;
+    if (!g_font_ok || px < 1) {
+        return 0;
+    }
+    scale = stbtt_ScaleForPixelHeight(&g_font, (float)px);
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
+    h = (int)((-descent) * scale + 0.5f);
+    return h < 0 ? 0 : h;
+}
+
+static void math_face(struct MathFace *face) {
+    face->advance = math_advance;
+    face->ascent = math_ascent_px;
+    face->descent = math_descent_px;
+    face->user = NULL;
+}
+
+/* Shrink once so an inline formula fits the line. Returns 0 when the subset accepts it. */
+static int math_fit(const char *s, size_t n, int line_h, int *px, int *w, int *asc, int *desc) {
+    struct MathFace face;
+    int use = 0;
+    int box = 0;
+    if (s == NULL || px == NULL || w == NULL || asc == NULL || desc == NULL) {
+        return -1;
+    }
+    use = line_h > 1 ? line_h * 4 / 5 : 1;
+    if (use < 1) {
+        use = 1;
+    }
+    math_face(&face);
+    if (math_measure(s, n, &face, use, w, asc, desc) != 0) {
+        return -1;
+    }
+    box = *asc + *desc;
+    if (line_h > 0 && box > line_h && use <= 1000000 / line_h) {
+        int shrunk = use * line_h / box;
+        if (shrunk < 1) {
+            shrunk = 1;
+        }
+        if (shrunk < use && math_measure(s, n, &face, shrunk, w, asc, desc) == 0) {
+            use = shrunk;
+        }
+    }
+    *px = use;
+    return 0;
+}
+
+static void math_glyph_cb(void *user, unsigned cp, int x, int baseline, int px) {
+    struct MathPaint *paint = user;
+    float scale = 0.f;
+    int x0 = 0;
+    int y0 = 0;
+    int gw = 0;
+    int gh = 0;
+    unsigned char scratch[256 * 256];
+    const unsigned char *bits = NULL;
+    int by = 0;
+    int bx = 0;
+    if (paint == NULL || paint->px == NULL || cp < 33) {
+        return;
+    }
+    scale = stbtt_ScaleForPixelHeight(&g_font, (float)px);
+    bits = glyph_bits(0, &g_font, cp, scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
+    if (bits == NULL) {
+        return;
+    }
+    for (by = 0; by < gh; by++) {
+        for (bx = 0; bx < gw; bx++) {
+            int dx = x + x0 + bx;
+            if (dx < paint->max_x) {
+                blend(paint->px, paint->width, paint->height, dx, baseline + y0 + by, bits[by * gw + bx], paint->r,
+                      paint->g, paint->b);
+            }
+        }
+    }
+}
+
+static void math_rule_cb(void *user, int x, int y, int w, int h) {
+    struct MathPaint *paint = user;
+    if (paint == NULL || paint->px == NULL || w < 1 || h < 1) {
+        return;
+    }
+    if (x >= paint->max_x) {
+        return;
+    }
+    if (x < paint->max_x && w > paint->max_x - x) {
+        w = paint->max_x - x;
+    }
+    fill_rect(paint->px, paint->width, paint->height, x, y, w, h, paint->r, paint->g, paint->b);
+}
+
 static int glyph_hidden(const char *text, size_t off, size_t len, size_t hide, int source, const uint8_t *mark, size_t at) {
     if (!source && hide > 0 && at < off + hide) {
         return 1;
@@ -1870,7 +2125,7 @@ static int glyph_hidden(const char *text, size_t off, size_t len, size_t hide, i
 
 /* Visible width of [from, to), starting after prev_cp. Hidden marks add nothing. */
 static long long span_width(const char *text, size_t off, size_t len, size_t hide, int source, const uint8_t *mark,
-                            size_t from, size_t to, int prev_cp, float scale, int space_px) {
+                            size_t from, size_t to, int prev_cp, float scale, int space_px, int line_h) {
     long long width = 0;
     int prev = prev_cp;
     int have_prev = prev_cp != 0;
@@ -1888,6 +2143,24 @@ static long long span_width(const char *text, size_t off, size_t len, size_t hid
             continue;
         }
         i += (size_t)n;
+        if (!source && mark != NULL && at >= off && at - off < len && mark[at - off] == KIND_MATH &&
+            (at == off || mark[at - off - 1] != KIND_MATH)) {
+            size_t m = at;
+            int mp = 0;
+            int mw = 0;
+            int ma = 0;
+            int md = 0;
+            while (m < to && m - off < len && mark[m - off] == KIND_MATH) {
+                m++;
+            }
+            if (math_fit(text + at, m - at, line_h, &mp, &mw, &ma, &md) == 0) {
+                width += mw;
+                prev = 0;
+                have_prev = 0;
+                i = m;
+                continue;
+            }
+        }
         if (glyph_hidden(text, off, len, hide, source, mark, at)) {
             continue;
         }
@@ -1898,13 +2171,14 @@ static long long span_width(const char *text, size_t off, size_t len, size_t hid
         } else {
             int span_kind = mark != NULL && at >= off && at - off < len ? mark[at - off] : KIND_BODY;
             stbtt_fontinfo *span_font = style_font(span_kind, NULL);
+            float glyph_scale = face_scale(span_font, scale);
             stbtt_GetCodepointHMetrics(span_font, (int)cp, &ax, &lsb);
-            advance = (long long)(ax * scale + 0.5f);
+            advance = (long long)(ax * glyph_scale + 0.5f);
             if (advance < 1) {
                 advance = 1;
             }
             if (have_prev) {
-                kern = (long long)(stbtt_GetCodepointKernAdvance(span_font, prev, (int)cp) * scale);
+                kern = (long long)(stbtt_GetCodepointKernAdvance(span_font, prev, (int)cp) * glyph_scale);
             }
             prev = (int)cp;
             have_prev = 1;
@@ -2091,6 +2365,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         int kind_here = mark != NULL && at >= off && at - off < len ? mark[at - off] : uniform;
         int face_here = 0;
         stbtt_fontinfo *face_font = style_font(kind_here, &face_here);
+        float glyph_scale = face_scale(face_font, scale);
         long long advance = space_px;
         int glyph = cp != '\t';
         if (cp == '\t') {
@@ -2101,14 +2376,14 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
         int lsb = 0;
         if (glyph) {
             stbtt_GetCodepointHMetrics(face_font, (int)cp, &ax, &lsb);
-            advance = (long long)(ax * scale + 0.5f);
+            advance = (long long)(ax * glyph_scale + 0.5f);
             if (advance < 1) {
                 advance = 1;
             }
         }
         long long kern = 0;
         if (glyph && prev != 0 && x > origin_x) {
-            kern = (long long)(stbtt_GetCodepointKernAdvance(face_font, prev, (int)cp) * scale);
+            kern = (long long)(stbtt_GetCodepointKernAdvance(face_font, prev, (int)cp) * glyph_scale);
         }
         if (cp == ' ' || cp == '\t') {
             word_open = 0;
@@ -2124,7 +2399,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                 }
                 wend += (size_t)wn;
             }
-            long long ww = span_width(text, off, len, hide, source, mark, at, wend, prev, scale, space_px);
+            long long ww = span_width(text, off, len, hide, source, mark, at, wend, prev, scale, space_px, line_h);
             long long room = (long long)max_x - x;
             int at_left = x == row_x && row_x == origin_x;
             if (!g_line_clip && !at_left && ww > room) {
@@ -2217,6 +2492,54 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                 advance = 0;
             }
         }
+        if (!source && kind == KIND_MATH && mark != NULL) {
+            int math_start = at == off || mark[at - off - 1] != KIND_MATH;
+            if (math_start) {
+                size_t mend = at;
+                int mp = 0;
+                int mw = 0;
+                int ma = 0;
+                int md = 0;
+                while (mend < end && mend - off < len && mark[mend - off] == KIND_MATH) {
+                    mend++;
+                }
+                if (math_fit(text + at, mend - at, line_h, &mp, &mw, &ma, &md) == 0) {
+                    glyph = 0;
+                    advance = mw;
+                    if (g_seek) {
+                        int right = x;
+                        if (mw > 0 && x <= INT_MAX - mw) {
+                            right = x + mw;
+                        }
+                        consider(at, x, (int)row);
+                        consider(mend, right, (int)row);
+                    }
+                    if (draw && on_screen && px != NULL) {
+                        int sy = screen_row(row_y, scroll, origin_y);
+                        if (sy != INT_MIN) {
+                            struct MathPaint paint;
+                            struct MathFace face;
+                            struct MathDraw drawer;
+                            int box = ma + md;
+                            int top = sy + (line_h > box ? (line_h - box) / 2 : 0);
+                            slot_rgb(SLOT_INK, &paint.r, &paint.g, &paint.b);
+                            paint.px = px;
+                            paint.width = width;
+                            paint.height = height;
+                            paint.max_x = max_x;
+                            math_face(&face);
+                            drawer.glyph = math_glyph_cb;
+                            drawer.rule = math_rule_cb;
+                            drawer.user = &paint;
+                            math_draw(text + at, mend - at, &face, mp, x, top + ma, &drawer);
+                        }
+                    }
+                }
+            } else {
+                glyph = 0;
+                advance = 0;
+            }
+        }
         if (draw && on_screen && selected && px != NULL && advance > 0 && advance <= width) {
             int sy = screen_row(row_y, scroll, origin_y);
             if (sy != INT_MIN) {
@@ -2232,7 +2555,7 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
             int gh = 0;
             unsigned char scratch[256 * 256];
             const unsigned char *bitmap =
-                glyph_bits(face_here, face_font, cp, scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
+                glyph_bits(face_here, face_font, cp, glyph_scale, &x0, &y0, &gw, &gh, scratch, (int)sizeof scratch);
             if (bitmap != NULL) {
                 int sy = screen_row(row_y, scroll, origin_y);
                 int cr, cg, cb;
@@ -2373,6 +2696,7 @@ static int g_keep_sp;
 static int g_keep_editing;
 static int g_keep_readonly;
 static int g_keep_source;
+static int g_keep_mono;
 static float g_keep_scale;
 static int g_keep_x;
 static uint64_t g_keep_y;
@@ -2428,6 +2752,7 @@ static void keep_store(const struct Index *idx, const char *text, size_t text_le
     g_keep_editing = g_editing;
     g_keep_readonly = g_readonly;
     g_keep_source = g_source;
+    g_keep_mono = g_mono_stamp;
     g_keep_x = idx->caret_x;
     g_keep_y = idx->caret_y;
     g_keep_ok = 1;
@@ -2469,7 +2794,42 @@ static int keep_geometry(const char *text, size_t text_len, int origin_x, int ma
     return g_keep_ok && g_keep.n > 0 && text != NULL && g_keep_len == text_len && g_keep_ox == origin_x &&
            g_keep_mx == max_x && g_keep_lh == line_h && g_keep_sp == space_px && g_keep_scale == scale &&
            g_keep_editing == g_editing && g_keep_readonly == g_readonly && g_keep_source == g_source &&
-           text_hash(text, text_len) == g_keep_hash;
+           g_keep_mono == g_mono_stamp && text_hash(text, text_len) == g_keep_hash;
+}
+
+/* Tick lines keep their ticks in the measure so stepping onto the line does not need another row.
+   Code letters still use the code face. Other lines stay on the body measure. */
+static uint32_t measure_line(const char *text, size_t off, size_t content, size_t caret, int origin_x, int max_x,
+                             int use_h, int space_px, float use_scale, uint64_t y, int source_line, int kind, int *cx,
+                             int *crow) {
+    uint8_t *mark = NULL;
+    int layout_source = source_line;
+    int uniform = KIND_BODY;
+    size_t i = 0;
+    uint32_t rows = 0;
+    if (kind == KIND_CODE) {
+        uniform = KIND_CODE;
+    } else if (kind == KIND_BODY && content > 0 && content <= (1u << 18)) {
+        for (i = 0; i < content; i++) {
+            if (text[off + i] == '`') {
+                break;
+            }
+        }
+        if (i < content) {
+            mark = malloc(content);
+            if (mark != NULL) {
+                mark_inline(text + off, content, mark);
+                mark_block(text + off, content, mark);
+                if (!g_readonly && (g_editing || g_source)) {
+                    layout_source = 1;
+                }
+            }
+        }
+    }
+    rows = layout_line(NULL, 0, 0, text, off, content, caret, origin_x, max_x, 0, use_h, 0, space_px, use_scale, 0, y,
+                       0, 1, 0, 0, layout_source, mark, uniform, cx, crow);
+    free(mark);
+    return rows;
 }
 
 /* Move the caret on a stored index. One line is measured for the caret column. */
@@ -2477,6 +2837,26 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
                      int line_h, int space_px, float scale) {
     if (!keep_geometry(text, text_len, origin_x, max_x, line_h, space_px, scale) || g_keep_caret == caret) {
         return -1;
+    }
+    {
+        int old_in = 0;
+        int new_in = 0;
+        for (size_t i = 0; i < g_keep.n; i++) {
+            struct Line *line = &g_keep.lines[i];
+            size_t end = line->off + line->content;
+            if (line->kind != KIND_MATH) {
+                continue;
+            }
+            if (g_keep_caret >= line->off && g_keep_caret <= end) {
+                old_in = 1;
+            }
+            if (caret >= line->off && caret <= end) {
+                new_in = 1;
+            }
+        }
+        if (old_in != new_in) {
+            return -1;
+        }
     }
     for (size_t i = 0; i < g_keep.n; i++) {
         struct Line *line = &g_keep.lines[i];
@@ -2511,8 +2891,8 @@ static int keep_move(struct Index *idx, const char *text, size_t text_len, size_
         int cx = origin_x;
         int crow = 0;
         head_face(text, text_len, line.off, line.content, source_line, line_h, scale, &use_h, &use_scale, &slots);
-        layout_line(NULL, 0, 0, text, line.off, line.content, caret, origin_x, max_x, 0, use_h, 0, space_px, use_scale,
-                    0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
+        measure_line(text, line.off, line.content, caret, origin_x, max_x, use_h, space_px, use_scale, y, 1, line.kind,
+                     &cx, &crow);
         uint64_t caret_y = 0;
         uint32_t crow_u = crow < 0 ? 0 : (uint32_t)crow;
         if (add_rows(y, crow_u, line_h, &caret_y) != 0) {
@@ -2754,6 +3134,254 @@ static void blit_picture(uint8_t *px, int width, int height, const struct Pic *p
     }
 }
 
+/* A line whose only mark is a dollar fence. */
+static int dollar_only(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    if (i + 2 > n || s[i] != '$' || s[i + 1] != '$') {
+        return 0;
+    }
+    i += 2;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    return i == n;
+}
+
+/* $$expr$$ on one line. Writes the body span. */
+static int display_body(const char *s, size_t n, size_t *lo, size_t *hi) {
+    size_t i = 0;
+    size_t end = n;
+    while (i < end && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    while (end > i && (s[end - 1] == ' ' || s[end - 1] == '\t')) {
+        end--;
+    }
+    if (end < i + 5 || s[i] != '$' || s[i + 1] != '$' || s[end - 1] != '$' || s[end - 2] != '$') {
+        return 0;
+    }
+    if (i + 2 >= end - 2) {
+        return 0;
+    }
+    *lo = i + 2;
+    *hi = end - 2;
+    return 1;
+}
+
+static int append_formula(char *buf, size_t cap, size_t *n, const char *s, size_t len) {
+    if (*n > 0) {
+        if (*n + 1 >= cap) {
+            return -1;
+        }
+        buf[(*n)++] = ' ';
+    }
+    if (len >= cap - *n) {
+        return -1;
+    }
+    if (len > 0) {
+        memcpy(buf + *n, s, len);
+    }
+    *n += len;
+    buf[*n] = '\0';
+    return 0;
+}
+
+/* Body rows for a display formula, or 0 when this subset refuses it. */
+static int math_rows(const char *s, size_t n, int line_h) {
+    struct MathFace face;
+    int w = 0;
+    int asc = 0;
+    int desc = 0;
+    int pad = 0;
+    int box = 0;
+    int rows = 0;
+    if (line_h < 1) {
+        line_h = 1;
+    }
+    math_face(&face);
+    if (math_measure(s, n, &face, line_h, &w, &asc, &desc) != 0) {
+        return 0;
+    }
+    pad = line_h / 8;
+    if (pad < 2) {
+        pad = 2;
+    }
+    box = asc + desc + pad * 2;
+    if (box < 1) {
+        box = 1;
+    }
+    rows = (box + line_h - 1) / line_h;
+    if (rows < 1) {
+        rows = 1;
+    }
+    if (rows > 16) {
+        rows = 16;
+    }
+    return rows;
+}
+
+static void mark_math(const char *text, size_t text_len, struct Index *idx, size_t caret, int line_h) {
+    size_t i = 0;
+    if (text == NULL || idx == NULL || idx->lines == NULL) {
+        return;
+    }
+    while (i < idx->n) {
+        struct Line *line = &idx->lines[i];
+        size_t lo = 0;
+        size_t hi = 0;
+        const char *s = NULL;
+        if (line->kind == KIND_CODE || line->off > text_len || line->content > text_len - line->off) {
+            i++;
+            continue;
+        }
+        s = text + line->off;
+        if (display_body(s, line->content, &lo, &hi)) {
+            int rows = math_rows(s + lo, hi - lo, line_h);
+            int inside = caret >= line->off && caret <= line->off + line->content;
+            int show = !g_readonly && (g_source || (g_editing && inside));
+            if (rows > 0) {
+                line->kind = KIND_MATH;
+                if (!show) {
+                    line->rows = (uint32_t)rows;
+                }
+            }
+            i++;
+            continue;
+        }
+        if (dollar_only(s, line->content)) {
+            size_t j = i + 1;
+            int closed = 0;
+            while (j < idx->n && idx->lines[j].kind != KIND_CODE) {
+                struct Line *inner = &idx->lines[j];
+                if (inner->off <= text_len && inner->content <= text_len - inner->off &&
+                    dollar_only(text + inner->off, inner->content)) {
+                    closed = 1;
+                    break;
+                }
+                j++;
+            }
+            if (closed) {
+                char buf[1025];
+                size_t bn = 0;
+                size_t k = 0;
+                int rows = 0;
+                int inside = 0;
+                int show = 0;
+                buf[0] = '\0';
+                for (k = i + 1; k < j; k++) {
+                    if (append_formula(buf, sizeof buf, &bn, text + idx->lines[k].off, idx->lines[k].content) != 0) {
+                        bn = 0;
+                        break;
+                    }
+                }
+                rows = bn > 0 ? math_rows(buf, bn, line_h) : 0;
+                if (rows > 0) {
+                    for (k = i; k <= j; k++) {
+                        size_t end = idx->lines[k].off + idx->lines[k].content;
+                        idx->lines[k].kind = KIND_MATH;
+                        if (caret >= idx->lines[k].off && caret <= end) {
+                            inside = 1;
+                        }
+                    }
+                    show = !g_readonly && (g_source || (g_editing && inside));
+                    if (!show) {
+                        idx->lines[i].rows = (uint32_t)rows;
+                        for (k = i + 1; k <= j; k++) {
+                            idx->lines[k].rows = 0;
+                        }
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+}
+
+static void paint_display_math(uint8_t *px, int width, int height, const char *text, size_t text_len,
+                               const struct Index *idx, size_t li, int origin_x, int max_x, int origin_y, int line_h,
+                               uint64_t y, uint64_t scroll) {
+    char buf[1025];
+    size_t n = 0;
+    struct Line line = idx->lines[li];
+    size_t lo = 0;
+    size_t hi = 0;
+    struct MathFace face;
+    struct MathPaint paint;
+    struct MathDraw drawer;
+    int w = 0;
+    int asc = 0;
+    int desc = 0;
+    int sy = 0;
+    int x = 0;
+    int top = 0;
+    int room = 0;
+    int span = 0;
+    int box = 0;
+    buf[0] = '\0';
+    if (line.off > text_len || line.content > text_len - line.off) {
+        return;
+    }
+    if (display_body(text + line.off, line.content, &lo, &hi)) {
+        if (hi - lo >= sizeof buf) {
+            return;
+        }
+        memcpy(buf, text + line.off + lo, hi - lo);
+        n = hi - lo;
+        buf[n] = '\0';
+    } else {
+        size_t k = 0;
+        for (k = li + 1; k < idx->n && idx->lines[k].kind == KIND_MATH; k++) {
+            const struct Line *inner = &idx->lines[k];
+            if (inner->off > text_len || inner->content > text_len - inner->off) {
+                return;
+            }
+            if (dollar_only(text + inner->off, inner->content)) {
+                break;
+            }
+            if (append_formula(buf, sizeof buf, &n, text + inner->off, inner->content) != 0) {
+                return;
+            }
+        }
+    }
+    math_face(&face);
+    if (n == 0 || line_h < 1 || math_measure(buf, n, &face, line_h, &w, &asc, &desc) != 0) {
+        return;
+    }
+    sy = screen_row(y, scroll, origin_y);
+    if (px == NULL || sy == INT_MIN) {
+        return;
+    }
+    room = max_x - origin_x;
+    x = origin_x;
+    if (room > w) {
+        x = origin_x + (room - w) / 2;
+    }
+    box = asc + desc;
+    span = line_h;
+    if (line.rows > 0 && line.rows <= (uint32_t)(INT_MAX / line_h)) {
+        span = (int)line.rows * line_h;
+    }
+    top = sy;
+    if (span > box) {
+        top = sy + (span - box) / 2;
+    }
+    slot_rgb(SLOT_INK, &paint.r, &paint.g, &paint.b);
+    paint.px = px;
+    paint.width = width;
+    paint.height = height;
+    paint.max_x = max_x;
+    math_face(&face);
+    drawer.glyph = math_glyph_cb;
+    drawer.rule = math_rule_cb;
+    drawer.user = &paint;
+    math_draw(buf, n, &face, line_h, x, top + asc, &drawer);
+}
+
 static int build_index(struct Index *idx, const char *text, size_t text_len, size_t caret, int origin_x, int max_x,
                        int line_h, int space_px, float scale) {
     if (keep_geometry(text, text_len, origin_x, max_x, line_h, space_px, scale) && g_keep_caret == caret) {
@@ -2832,8 +3460,8 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         int on_caret = caret >= off && caret <= off + content;
         int source_line = !g_readonly && (g_source || (g_editing && on_caret));
         head_face(text, text_len, off, content, source_line, line_h, scale, &use_h, &use_scale, &slots);
-        uint32_t rows = layout_line(NULL, 0, 0, text, off, content, caret, origin_x, max_x, 0, use_h, 0, space_px,
-                                    use_scale, 0, y, 0, 1, 0, 0, 1, NULL, KIND_BODY, &cx, &crow);
+        uint32_t rows = measure_line(text, off, content, caret, origin_x, max_x, use_h, space_px, use_scale, y,
+                                     source_line, kind, &cx, &crow);
         if (rows == 0) {
             rows = 1;
         }
@@ -2902,6 +3530,7 @@ static int build_index(struct Index *idx, const char *text, size_t text_len, siz
         }
     }
     mark_tables(text, idx);
+    mark_math(text, text_len, idx, caret, line_h);
     measure_tables(text, idx, origin_x, max_x, scale);
     {
         uint64_t place = 0;
@@ -3360,6 +3989,126 @@ int page_link_url(const char *text, size_t len, size_t at, char *out, size_t cap
         memcpy(out, text + url, n);
         out[n] = '\0';
         return 0;
+    }
+    {
+        const char *s = text + line;
+        size_t nline = end - line;
+        size_t i = 0;
+        for (i = 0; i < nline; i++) {
+            size_t j = i + 1;
+            size_t k = 0;
+            size_t dn = 0;
+            if (s[i] != '<') {
+                continue;
+            }
+            if (j + 8 <= nline && memcmp(s + j, "https://", 8) == 0) {
+                k = j;
+            } else if (j + 7 <= nline && memcmp(s + j, "http://", 7) == 0) {
+                k = j;
+            } else {
+                continue;
+            }
+            while (k < nline && s[k] != '>' && s[k] != ' ' && s[k] != '<') {
+                k++;
+            }
+            if (!(k < nline && s[k] == '>' && k > i + 8)) {
+                continue;
+            }
+            if (at < line + i || at > line + k) {
+                continue;
+            }
+            dn = k - j;
+            if (dn + 1 > cap) {
+                return -1;
+            }
+            memcpy(out, s + j, dn);
+            out[dn] = '\0';
+            return 0;
+        }
+        for (i = 0; i < nline;) {
+            size_t bare = 0;
+            int www = 0;
+            size_t dn = 0;
+            size_t pre = 0;
+            if (!link_extended(s, nline, i, &bare, &www)) {
+                i++;
+                continue;
+            }
+            if (at < line + i || at >= line + bare) {
+                i = bare;
+                continue;
+            }
+            dn = bare - i;
+            pre = www ? 7 : 0;
+            if (dn > cap - 1 || pre > cap - 1 - dn) {
+                return -1;
+            }
+            if (www) {
+                memcpy(out, "http://", 7);
+            }
+            memcpy(out + pre, s + i, dn);
+            out[pre + dn] = '\0';
+            return 0;
+        }
+        for (i = 0; i < nline; i++) {
+            size_t j = i + 1;
+            size_t k = j;
+            size_t bare = 0;
+            int scheme = 0;
+            size_t dn = 0;
+            size_t pre = 0;
+            if (s[i] != '<') {
+                continue;
+            }
+            while (k < nline && s[k] != '>' && s[k] != ' ' && s[k] != '<') {
+                k++;
+            }
+            if (!(k < nline && s[k] == '>' && k > j)) {
+                continue;
+            }
+            if (at < line + i || at > line + k) {
+                continue;
+            }
+            if (!link_email(s + j, k - j, 0, &bare, &scheme) || bare != k - j) {
+                continue;
+            }
+            dn = k - j;
+            pre = scheme ? 0 : 7;
+            if (dn > cap - 1 || pre > cap - 1 - dn) {
+                return -1;
+            }
+            if (!scheme) {
+                memcpy(out, "mailto:", 7);
+            }
+            memcpy(out + pre, s + j, dn);
+            out[pre + dn] = '\0';
+            return 0;
+        }
+        for (i = 0; i < nline;) {
+            size_t bare = 0;
+            int scheme = 0;
+            size_t dn = 0;
+            size_t pre = 0;
+            if (!link_email(s, nline, i, &bare, &scheme)) {
+                i++;
+                continue;
+            }
+            if (at < line + i || at >= line + bare) {
+                i = bare;
+                continue;
+            }
+            dn = bare - i;
+            pre = scheme ? 0 : 7;
+            if (dn > cap - 1 || pre > cap - 1 - dn) {
+                return -1;
+            }
+            if (!scheme) {
+                memcpy(out, "mailto:", 7);
+            }
+            memcpy(out + pre, s + i, dn);
+            out[pre + dn] = '\0';
+            return 0;
+        }
     }
     return -1;
 }
@@ -4005,6 +4754,19 @@ static int line_is_source(const char *text, size_t text_len, const struct Index 
     if (li == caret_li) {
         return 1;
     }
+    if (idx->lines[li].kind == KIND_MATH) {
+        size_t a = li;
+        size_t b = li;
+        while (a > 0 && idx->lines[a - 1].kind == KIND_MATH) {
+            a--;
+        }
+        while (b + 1 < idx->n && idx->lines[b + 1].kind == KIND_MATH) {
+            b++;
+        }
+        if (caret_li >= a && caret_li <= b) {
+            return 1;
+        }
+    }
     return fence_around(text, text_len, idx, caret_li, &lo, &hi) && li >= lo && li <= hi;
 }
 
@@ -4096,6 +4858,7 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
     if (font_px < 8) {
         font_px = 8;
     }
+    g_em_px = font_px;
     int margin = page_margin(font_px);
     /* A font taller than the box would otherwise push the caret past the buffer. */
     if (box_h > 4 && margin > box_h / 4) {
@@ -4229,6 +4992,11 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
         if (line.kind == KIND_TABLE && line.rows > 0 && next > scroll && y < window) {
             paint_table_line(px, width, height, text, &idx, li, origin_x, max_x, origin_y, line_h, baseline, scale,
                              space_px, y, scroll, view_h, caret);
+        } else if (!source && line.kind == KIND_MATH) {
+            if (line.rows > 0 && next > scroll && y < window) {
+                paint_display_math(px, width, height, text, text_len, &idx, li, origin_x, max_x, origin_y, line_h, y,
+                                   scroll);
+            }
         } else if (!source && line.kind != KIND_TABLE && line.content > 0 && next > scroll && y < window) {
             char url[PIC_NAME];
             const struct Pic *pic = NULL;
@@ -4448,6 +5216,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     if (font_px < 8) {
         font_px = 8;
     }
+    g_em_px = font_px;
     int margin = page_margin(font_px);
     if (box_h > 4 && margin > box_h / 4) {
         margin = box_h / 4;
@@ -4529,7 +5298,7 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
     int source = line_is_source(text, text_len, &idx, li, caret_li);
     uint8_t *mark = NULL;
     const uint8_t *marks = NULL;
-    if (!source && line.kind == KIND_BODY && line.content > 0 && line.content <= (1u << 18)) {
+    if (line.kind == KIND_BODY && line.content > 0 && line.content <= (1u << 18)) {
         mark = malloc(line.content);
         if (mark != NULL) {
             mark_inline(text + line.off, line.content, mark);
@@ -4770,6 +5539,7 @@ int page_same_unit(const char *text, size_t text_len, size_t a, size_t b) {
     if (b > text_len) {
         b = text_len;
     }
+    g_em_px = 16;
     float scale = stbtt_ScaleForPixelHeight(&g_font, 16.f);
     struct Index idx;
     memset(&idx, 0, sizeof idx);
