@@ -29,6 +29,39 @@ static unsigned char *load_font(int *len) {
     return bytes;
 }
 
+static int head_span(const uint8_t *px, int width, int height) {
+    int lo = height;
+    int hi = 0;
+    int y = 0;
+    int x = 0;
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = (int)p[0] - PAGE_HEAD_R;
+            int dg = (int)p[1] - PAGE_HEAD_G;
+            int db = (int)p[2] - PAGE_HEAD_B;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 12 && dg <= 12 && db <= 12) {
+                if (y < lo) {
+                    lo = y;
+                }
+                if (y > hi) {
+                    hi = y;
+                }
+            }
+        }
+    }
+    return hi > lo ? hi - lo : 0;
+}
+
 static int ink_at(const uint8_t *px, int width, int x, int y) {
     const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
     return p[0] != PAGE_PAPER_R || p[1] != PAGE_PAPER_G || p[2] != PAGE_PAPER_B;
@@ -537,6 +570,40 @@ static void test_rendered(const unsigned char *font, int font_len) {
         }
     }
     expect(h1_hi > h1_lo && h2_hi > h2_lo && h1_hi - h1_lo > h2_hi - h2_lo, "a single hash is taller than two");
+    const char *h3 = "### Hi\nZ";
+    const char *h6 = "###### Hi\nZ";
+    const char *plain = "Hi";
+    int caret_x = 0;
+    int caret_y = 0;
+    int caret_h = 0;
+    int plain_lo = height;
+    int plain_hi = 0;
+    int py = 0;
+    int px_i = 0;
+    page_draw(px, width, height, 0, 0, width, height, h3, strlen(h3), strlen(h3), strlen(h3), font_px);
+    int h3_span = head_span(px, width, height);
+    page_draw(px, width, height, 0, 0, width, height, h6, strlen(h6), strlen(h6), strlen(h6), font_px);
+    int h6_span = head_span(px, width, height);
+    page_draw(px, width, height, 0, 0, width, height, plain, strlen(plain), strlen(plain), strlen(plain), font_px);
+    page_caret_box(&caret_x, &caret_y, &caret_h);
+    for (py = 0; py < height; py++) {
+        for (px_i = 0; px_i < width; px_i++) {
+            if (px_i >= caret_x && px_i < caret_x + 4) {
+                continue;
+            }
+            if (!ink_at(px, width, px_i, py)) {
+                continue;
+            }
+            if (py < plain_lo) {
+                plain_lo = py;
+            }
+            if (py > plain_hi) {
+                plain_hi = py;
+            }
+        }
+    }
+    expect(h3_span > h6_span && plain_hi > plain_lo && h6_span > plain_hi - plain_lo,
+           "six hashes sit between three hashes and the paragraph");
 
     const char *list = "- H\nZ";
     page_set_editing(1);
@@ -576,9 +643,13 @@ static void test_rendered(const unsigned char *font, int font_len) {
     page_draw(px, width, height, 0, 0, width, height, rule, strlen(rule), strlen(rule), strlen(rule), font_px);
     expect(near_rgb(px, width, height, PAGE_RULE_R, PAGE_RULE_G, PAGE_RULE_B), "a rule draws a bar");
 
+    const char *bullet = "- H\nZ";
+    page_draw(px, width, height, 0, 0, width, height, bullet, strlen(bullet), strlen(bullet), strlen(bullet), font_px);
+    int bullet_ink = count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B);
     const char *task = "- [x] H\nZ";
     page_draw(px, width, height, 0, 0, width, height, task, strlen(task), strlen(task), strlen(task), font_px);
-    expect(count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B) > 16, "a task draws a box");
+    int task_ink = count_exact(px, width, height, PAGE_LIST_R, PAGE_LIST_G, PAGE_LIST_B);
+    expect(task_ink > 16 && task_ink > bullet_ink, "a checkbox is larger than a bullet");
 
     const char *setext = "Hello\n===\nZ";
     page_set_source(0);

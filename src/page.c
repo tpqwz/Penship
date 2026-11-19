@@ -838,8 +838,7 @@ static int line_level(const char *text, size_t text_len, size_t off, size_t cont
     return setext_level(text + a, b - a);
 }
 
-/* A level-1 heading uses two body rows and the largest face. A level-2 heading uses two rows and a middle face.
-   A source line stays body size so the marks do not jump. */
+/* Levels 1 through 6 use two body rows, each a step smaller. A source line stays body size so the marks do not jump. */
 static void head_face(const char *text, size_t text_len, size_t off, size_t content, int source, int line_h,
                       float scale, int *use_h, float *use_scale, int *slots) {
     int level = 0;
@@ -850,13 +849,16 @@ static void head_face(const char *text, size_t text_len, size_t off, size_t cont
         return;
     }
     level = line_level(text, text_len, off, content);
-    if (level != 1 && level != 2) {
+    if (level < 1 || level > 6) {
         return;
     }
     if (*use_h <= INT_MAX / 2) {
         *use_h *= 2;
     }
-    *use_scale = level == 1 ? scale * 1.5f : scale * 1.25f;
+    {
+        static const float step[] = {0.f, 1.50f, 1.25f, 1.12f, 1.10f, 1.08f, 1.06f};
+        *use_scale = scale * step[level];
+    }
     *slots = 2;
 }
 
@@ -1925,6 +1927,8 @@ static struct Pic g_pic[PIC_MAX];
 
 static const struct Pic *picture_from_alt(const char *text, size_t off, size_t len, size_t at);
 static void blit_picture(uint8_t *px, int width, int height, const struct Pic *pic, int x, int y, int w, int h);
+static void stroke_seg(uint8_t *px, int width, int height, float x0, float y0, float x1, float y1, float thick, int r,
+                       int g, int b);
 
 static uint32_t layout_line(uint8_t *px, int width, int height, const char *text, size_t off, size_t len,
                             size_t caret, int origin_x, int max_x, int origin_y, int line_h, int baseline,
@@ -2006,6 +2010,17 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                     if (side < 4) {
                         side = 4;
                     }
+                    /* A checkbox is a control, not a bullet. Half the line, and still inside the row. */
+                    if (list == 2 || list == 3) {
+                        int box = line_h / 2;
+                        if (box < side) {
+                            box = side;
+                        }
+                        if (line_h > 4 && box > line_h - 2) {
+                            box = line_h - 2;
+                        }
+                        side = box;
+                    }
                     if (draw && px != NULL && sy != INT_MIN) {
                         int by = sy + (line_h - side) / 2;
                         int lr, lg, lb;
@@ -2022,7 +2037,18 @@ static uint32_t layout_line(uint8_t *px, int width, int height, const char *text
                             fill_rect(px, width, height, x, by, t, side, lr, lg, lb);
                             fill_rect(px, width, height, x + side - t, by, t, side, lr, lg, lb);
                             if (list == 3 && side > t * 3) {
-                                fill_rect(px, width, height, x + t, by + t, side - t * 2, side - t * 2, lr, lg, lb);
+                                float mark = (float)t;
+                                if (mark < 2.f) {
+                                    mark = 2.f;
+                                }
+                                float x0 = (float)x + (float)side * 0.22f;
+                                float y0 = (float)by + (float)side * 0.54f;
+                                float x1 = (float)x + (float)side * 0.42f;
+                                float y1 = (float)by + (float)side * 0.76f;
+                                float x2 = (float)x + (float)side * 0.80f;
+                                float y2 = (float)by + (float)side * 0.28f;
+                                stroke_seg(px, width, height, x0, y0, x1, y1, mark, lr, lg, lb);
+                                stroke_seg(px, width, height, x1, y1, x2, y2, mark, lr, lg, lb);
                             }
                         }
                     }
@@ -2407,7 +2433,7 @@ static void keep_store(const struct Index *idx, const char *text, size_t text_le
     g_keep_ok = 1;
 }
 
-/* Row count changes with the caret for a rendered level-1 or level-2 heading, which takes two body rows.
+/* Row count changes with the caret for a rendered heading, which takes two body rows.
    Every other line was measured as source, so a caret move does not rewrap it. */
 static int heading_slots(const char *text, size_t text_len, struct Line line, size_t caret) {
     int on = caret >= line.off && caret <= line.off + line.content;
@@ -2417,7 +2443,7 @@ static int heading_slots(const char *text, size_t text_len, struct Line line, si
         return 1;
     }
     level = line_level(text, text_len, line.off, line.content);
-    if (level != 1 && level != 2) {
+    if (level < 1 || level > 6) {
         return 1;
     }
     return 2;

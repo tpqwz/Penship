@@ -57,8 +57,8 @@ static int unfilter(unsigned char *raw, int height, int stride, int bpp) {
     return 0;
 }
 
-/* shortcut: baseline JPEG only. Progressive, arithmetic, and CMYK are refused.
-   Three components are read as YCbCr. */
+/* shortcut: arithmetic and CMYK JPEG are refused. Three components are read as YCbCr.
+   A progressive file keeps one coefficient grid per component and fills it scan by scan. */
 static const unsigned char k_zigzag[64] = {0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33, 40, 48,
                                             41, 34, 27, 20, 13, 6,  7,  14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23,
                                             30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
@@ -91,8 +91,11 @@ struct Comp {
     int ta;
     int pred;
     unsigned char *plane;
+    short *coef;
     int pw;
     int ph;
+    int nbx;
+    int nby;
 };
 
 struct Jpeg {
@@ -107,6 +110,14 @@ struct Jpeg {
     int maxh;
     int maxv;
     int saw_sof;
+    int progressive;
+    int ss;
+    int se;
+    int ah;
+    int al;
+    int eob_run;
+    int scan_n;
+    int scan_comp[3];
     struct Comp comp[3];
     unsigned char quant[4][64];
     int quant_ok[4];
@@ -120,7 +131,9 @@ static void jpeg_clear(struct Jpeg *j) {
     int i = 0;
     for (i = 0; i < 3; i++) {
         free(j->comp[i].plane);
+        free(j->comp[i].coef);
         j->comp[i].plane = NULL;
+        j->comp[i].coef = NULL;
     }
 }
 
@@ -510,12 +523,31 @@ static int parse_sos(struct Jpeg *j, const unsigned char *data, int len) {
         return -1;
     }
     n = data[0];
-    if (n != j->ncomp || len < 4 + 2 * n) {
+    if (n < 1 || n > j->ncomp || len < 4 + 2 * n) {
         return -1;
     }
-    if (data[1 + 2 * n] != 0 || data[2 + 2 * n] != 63 || data[3 + 2 * n] != 0) {
+    j->ss = data[1 + 2 * n];
+    j->se = data[2 + 2 * n];
+    j->ah = data[3 + 2 * n] >> 4;
+    j->al = data[3 + 2 * n] & 15;
+    if (j->ss > j->se || j->se > 63 || j->ah > 13 || j->al > 13) {
         return -1;
     }
+    if (!j->progressive) {
+        if (n != j->ncomp || j->ss != 0 || j->se != 63 || j->ah != 0 || j->al != 0) {
+            return -1;
+        }
+    } else if (j->ss == 0) {
+        if (j->ah != 0 && j->se != 0) {
+            return -1;
+        }
+        if (j->se != 0 && n != 1) {
+            return -1;
+        }
+    } else if (n != 1) {
+        return -1;
+    }
+    j->scan_n = n;
     for (i = 0; i < n; i++) {
         int id = data[1 + i * 2];
         int tables = data[2 + i * 2];
@@ -529,6 +561,7 @@ static int parse_sos(struct Jpeg *j, const unsigned char *data, int len) {
                 seen[c] = 1;
                 j->comp[c].td = tables >> 4;
                 j->comp[c].ta = tables & 15;
+                j->scan_comp[i] = c;
                 found = 1;
                 break;
             }
@@ -539,6 +572,391 @@ static int parse_sos(struct Jpeg *j, const unsigned char *data, int len) {
     }
     return 0;
 }
+
+/* Blocks actually stored for one component. A partial last MCU does not invent extra blocks. */
+static int blocks_in(int size, int samp, int maxs) {
+    int denom = 8 * maxs;
+    if (size < 1 || samp < 1 || maxs < 1 || denom < 8) {
+        return 0;
+    }
+    return (size * samp + denom - 1) / denom;
+}
+
+static int mcu_grid(const struct Jpeg *j, int *cols, int *rows) {
+    int mcu_w = 8 * j->maxh;
+    int mcu_h = 8 * j->maxv;
+    if (mcu_w < 8 || mcu_h < 8 || j->width > 4096 || j->height > 4096) {
+        return -1;
+    }
+    *cols = (j->width + mcu_w - 1) / mcu_w;
+    *rows = (j->height + mcu_h - 1) / mcu_h;
+    if (*cols < 1 || *rows < 1 || *cols > 4096 || *rows > 4096) {
+        return -1;
+    }
+    return 0;
+}
+
+static int alloc_coef(struct Jpeg *j) {
+    int cols = 0;
+    int rows = 0;
+    int i = 0;
+    if (mcu_grid(j, &cols, &rows) != 0) {
+        return -1;
+    }
+    for (i = 0; i < j->ncomp; i++) {
+        size_t blocks = 0;
+        j->comp[i].nbx = blocks_in(j->width, j->comp[i].h, j->maxh);
+        j->comp[i].nby = blocks_in(j->height, j->comp[i].v, j->maxv);
+        if (j->comp[i].nbx < 1 || j->comp[i].nby < 1) {
+            return -1;
+        }
+        blocks = (size_t)j->comp[i].nbx * (size_t)j->comp[i].nby;
+        if (blocks > SIZE_MAX / 64) {
+            return -1;
+        }
+        j->comp[i].coef = calloc(blocks * 64, sizeof(short));
+        if (j->comp[i].coef == NULL) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int refine_coef(struct Jpeg *j, short *coef) {
+    int bit = next_bit(j);
+    int step = 0;
+    if (bit < 0 || j->al < 0 || j->al > 14) {
+        return -1;
+    }
+    if (!bit) {
+        return 0;
+    }
+    step = 1 << j->al;
+    if (*coef > 0) {
+        if (*coef > 32767 - step) {
+            return -1;
+        }
+        *coef = (short)(*coef + step);
+    } else if (*coef < 0) {
+        if (*coef < -32767 + step) {
+            return -1;
+        }
+        *coef = (short)(*coef - step);
+    }
+    return 0;
+}
+
+static int put_mag(short *dst, int mag) {
+    if (mag > 32767 || mag < -32767) {
+        return -1;
+    }
+    *dst = (short)mag;
+    return 0;
+}
+
+/* A negative magnitude cannot be shifted with <<. The coefficient stays inside a short. */
+static int shl_coef(int mag, int al) {
+    int neg = 0;
+    unsigned u = 0;
+    if (al < 0 || al > 14) {
+        return 0;
+    }
+    if (mag < 0) {
+        neg = 1;
+        mag = -mag;
+    }
+    if (al > 0 && mag > (32767 >> al)) {
+        return neg ? -32767 : 32767;
+    }
+    u = ((unsigned)mag) << al;
+    return neg ? -(int)u : (int)u;
+}
+
+/* One block of a progressive scan. DC and AC, first pass and refinement, share this. */
+static int decode_prog_block(struct Jpeg *j, struct Comp *comp, short *data) {
+    int k = j->ss;
+    if (j->ah == 0 && j->ss == 0) {
+        int cat = 0;
+        int bits = 0;
+        int diff = 0;
+        int mag = 0;
+        if (comp->td < 0 || comp->td > 3 || !j->dc_ok[comp->td]) {
+            return -1;
+        }
+        cat = huff_decode(j, &j->dc[comp->td]);
+        if (cat < 0 || cat > 11) {
+            return -1;
+        }
+        if (cat > 0 && read_bits(j, cat, &bits) != 0) {
+            return -1;
+        }
+        diff = extend_bits(bits, cat);
+        if (comp->pred > 20000 || comp->pred < -20000 || diff > 20000 || diff < -20000) {
+            return -1;
+        }
+        comp->pred += diff;
+        mag = shl_coef(comp->pred, j->al);
+        if (put_mag(&data[0], mag) != 0) {
+            return -1;
+        }
+        if (j->se == 0) {
+            return 0;
+        }
+        k = 1;
+    } else if (j->ah != 0 && j->ss == 0) {
+        return refine_coef(j, &data[0]);
+    }
+    if (comp->ta < 0 || comp->ta > 3 || !j->ac_ok[comp->ta]) {
+        return -1;
+    }
+    if (j->ah == 0) {
+        if (j->eob_run > 0) {
+            j->eob_run--;
+            return 0;
+        }
+        while (k <= j->se) {
+            int s = huff_decode(j, &j->ac[comp->ta]);
+            int run = 0;
+            int cat = 0;
+            int bits = 0;
+            if (s < 0) {
+                return -1;
+            }
+            run = s >> 4;
+            cat = s & 15;
+            if (cat != 0) {
+                if (cat > 10) {
+                    return -1;
+                }
+                k += run;
+                if (k > j->se || read_bits(j, cat, &bits) != 0) {
+                    return -1;
+                }
+                if (put_mag(&data[k_zigzag[k]], shl_coef(extend_bits(bits, cat), j->al)) != 0) {
+                    return -1;
+                }
+                k++;
+            } else if (run == 15) {
+                k += 16;
+            } else {
+                int extra = 0;
+                if (run > 0 && read_bits(j, run, &extra) != 0) {
+                    return -1;
+                }
+                j->eob_run = ((1 << run) + extra) - 1;
+                break;
+            }
+        }
+        return k > j->se + 16 ? -1 : 0;
+    }
+    if (j->eob_run > 0) {
+        while (k <= j->se) {
+            int nat = k_zigzag[k];
+            if (data[nat] != 0 && refine_coef(j, &data[nat]) != 0) {
+                return -1;
+            }
+            k++;
+        }
+        j->eob_run--;
+        return 0;
+    }
+    while (k <= j->se) {
+        int s = huff_decode(j, &j->ac[comp->ta]);
+        int run = 0;
+        int cat = 0;
+        int newv = 0;
+        int place = 0;
+        if (s < 0) {
+            return -1;
+        }
+        run = s >> 4;
+        cat = s & 15;
+        if (cat != 0) {
+            int sign = 0;
+            if (cat != 1) {
+                return -1;
+            }
+            sign = next_bit(j);
+            if (sign < 0) {
+                return -1;
+            }
+            newv = sign ? (1 << j->al) : -(1 << j->al);
+            place = 1;
+        } else if (run < 15) {
+            int extra = 0;
+            if (run > 0 && read_bits(j, run, &extra) != 0) {
+                return -1;
+            }
+            j->eob_run = (1 << run) + extra;
+            run = 0;
+            place = 0;
+        } else {
+            run = 16;
+        }
+        while (k <= j->se) {
+            int nat = k_zigzag[k];
+            if (data[nat] != 0) {
+                if (refine_coef(j, &data[nat]) != 0) {
+                    return -1;
+                }
+                k++;
+                continue;
+            }
+            if (run == 0) {
+                if (place) {
+                    data[nat] = (short)newv;
+                    k++;
+                }
+                break;
+            }
+            run--;
+            k++;
+            if (run == 0 && !place) {
+                break;
+            }
+        }
+        if (place && k > j->se + 1) {
+            return -1;
+        }
+        if (j->eob_run > 0) {
+            while (k <= j->se) {
+                int nat = k_zigzag[k];
+                if (data[nat] != 0 && refine_coef(j, &data[nat]) != 0) {
+                    return -1;
+                }
+                k++;
+            }
+            j->eob_run--;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int decode_scan_prog(struct Jpeg *j) {
+    int cols = 0;
+    int rows = 0;
+    int seen = 0;
+    int rst = 0;
+    int total = 0;
+    int i = 0;
+    if (mcu_grid(j, &cols, &rows) != 0) {
+        return -1;
+    }
+    j->nbits = 0;
+    j->acc = 0;
+    j->eob_run = 0;
+    if (j->ss == 0 && j->ah == 0) {
+        for (i = 0; i < j->scan_n; i++) {
+            j->comp[j->scan_comp[i]].pred = 0;
+        }
+    }
+    if (j->scan_n > 1) {
+        total = cols * rows;
+        for (int row = 0; row < rows; row++) {
+            for (int col = 0; col < cols; col++) {
+                for (i = 0; i < j->scan_n; i++) {
+                    struct Comp *comp = &j->comp[j->scan_comp[i]];
+                    int by = 0;
+                    int bx = 0;
+                    for (by = 0; by < comp->v; by++) {
+                        for (bx = 0; bx < comp->h; bx++) {
+                            int x = col * comp->h + bx;
+                            int y = row * comp->v + by;
+                            short scratch[64];
+                            short *data = scratch;
+                            memset(scratch, 0, sizeof scratch);
+                            if (x >= 0 && y >= 0 && x < comp->nbx && y < comp->nby) {
+                                data = comp->coef + ((size_t)y * (size_t)comp->nbx + (size_t)x) * 64;
+                            }
+                            if (decode_prog_block(j, comp, data) != 0) {
+                                return -1;
+                            }
+                        }
+                    }
+                }
+                seen++;
+                if (j->restart > 0 && seen < total && seen % j->restart == 0) {
+                    int c = 0;
+                    if (read_restart(j, rst) != 0) {
+                        return -1;
+                    }
+                    rst++;
+                    j->eob_run = 0;
+                    for (c = 0; c < j->scan_n; c++) {
+                        j->comp[j->scan_comp[c]].pred = 0;
+                    }
+                }
+            }
+        }
+    } else {
+        struct Comp *comp = &j->comp[j->scan_comp[0]];
+        total = comp->nbx * comp->nby;
+        for (i = 0; i < total; i++) {
+            if (decode_prog_block(j, comp, comp->coef + (size_t)i * 64) != 0) {
+                return -1;
+            }
+            if (j->restart > 0 && (i + 1) < total && (i + 1) % j->restart == 0) {
+                if (read_restart(j, rst) != 0) {
+                    return -1;
+                }
+                rst++;
+                j->eob_run = 0;
+                comp->pred = 0;
+            }
+        }
+    }
+    j->nbits = 0;
+    j->acc = 0;
+    return 0;
+}
+
+static int paint_coef(struct Jpeg *j) {
+    int i = 0;
+    for (i = 0; i < j->ncomp; i++) {
+        struct Comp *comp = &j->comp[i];
+        const unsigned char *quant = NULL;
+        int by = 0;
+        int bx = 0;
+        size_t n = 0;
+        if (comp->tq < 0 || comp->tq > 3 || !j->quant_ok[comp->tq] || comp->coef == NULL) {
+            return -1;
+        }
+        quant = j->quant[comp->tq];
+        comp->pw = comp->nbx * 8;
+        comp->ph = comp->nby * 8;
+        n = (size_t)comp->pw * (size_t)comp->ph;
+        if (comp->pw < 8 || comp->ph < 8 || n > (size_t)4096 * 4096) {
+            return -1;
+        }
+        comp->plane = calloc(n, 1);
+        if (comp->plane == NULL) {
+            return -1;
+        }
+        for (by = 0; by < comp->nby; by++) {
+            for (bx = 0; bx < comp->nbx; bx++) {
+                short *src = comp->coef + ((size_t)by * (size_t)comp->nbx + (size_t)bx) * 64;
+                int coef[64];
+                unsigned char block[64];
+                int k = 0;
+                int oy = by * 8;
+                int ox = bx * 8;
+                int yy = 0;
+                for (k = 0; k < 64; k++) {
+                    int nat = k_zigzag[k];
+                    coef[nat] = (int)src[nat] * (int)quant[k];
+                }
+                idct8(coef, block);
+                for (yy = 0; yy < 8; yy++) {
+                    memcpy(comp->plane + ((size_t)(oy + yy) * (size_t)comp->pw + (size_t)ox), block + yy * 8, 8);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int blocks_in(int size, int samp, int maxs);
 
 static int decode_scan(struct Jpeg *j) {
     int mcu_w = 8 * j->maxh;
@@ -562,11 +980,13 @@ static int decode_scan(struct Jpeg *j) {
     total = cols * rows;
     for (i = 0; i < j->ncomp; i++) {
         size_t n = 0;
-        if (cols > 4096 / j->comp[i].h || rows > 4096 / j->comp[i].v) {
+        j->comp[i].nbx = blocks_in(j->width, j->comp[i].h, j->maxh);
+        j->comp[i].nby = blocks_in(j->height, j->comp[i].v, j->maxv);
+        if (j->comp[i].nbx < 1 || j->comp[i].nby < 1) {
             return -1;
         }
-        j->comp[i].pw = cols * j->comp[i].h * 8;
-        j->comp[i].ph = rows * j->comp[i].v * 8;
+        j->comp[i].pw = j->comp[i].nbx * 8;
+        j->comp[i].ph = j->comp[i].nby * 8;
         n = (size_t)j->comp[i].pw * (size_t)j->comp[i].ph;
         if (j->comp[i].pw < 8 || j->comp[i].ph < 8 || n > (size_t)4096 * 4096) {
             return -1;
@@ -591,6 +1011,9 @@ static int decode_scan(struct Jpeg *j) {
                         int yy = 0;
                         if (decode_block(j, comp, block) != 0) {
                             return -1;
+                        }
+                        if (ox / 8 >= comp->nbx || oy / 8 >= comp->nby) {
+                            continue;
                         }
                         if (ox < 0 || oy < 0 || ox > comp->pw - 8 || oy > comp->ph - 8) {
                             return -1;
@@ -644,7 +1067,18 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
             break;
         }
         if (m == 0xda) {
-            if (payload_of(&j, &data, &len) != 0 || parse_sos(&j, data, len) != 0 || decode_scan(&j) != 0) {
+            if (payload_of(&j, &data, &len) != 0 || parse_sos(&j, data, len) != 0) {
+                jpeg_clear(&j);
+                return -1;
+            }
+            if (j.progressive) {
+                if (decode_scan_prog(&j) != 0) {
+                    jpeg_clear(&j);
+                    return -1;
+                }
+                continue;
+            }
+            if (decode_scan(&j) != 0) {
                 jpeg_clear(&j);
                 return -1;
             }
@@ -654,8 +1088,9 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
             jpeg_clear(&j);
             return -1;
         }
-        if (m == 0xc0) {
-            if (parse_sof(&j, data, len) != 0) {
+        if (m == 0xc0 || m == 0xc2) {
+            j.progressive = m == 0xc2;
+            if (parse_sof(&j, data, len) != 0 || (j.progressive && alloc_coef(&j) != 0)) {
                 jpeg_clear(&j);
                 return -1;
             }
@@ -675,10 +1110,14 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
                 return -1;
             }
             j.restart = (data[0] << 8) | data[1];
-        } else if (m == 0xc1 || m == 0xc2 || m == 0xc3 || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcf)) {
+        } else if (m == 0xc1 || m == 0xc3 || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcf)) {
             jpeg_clear(&j);
             return -1;
         }
+    }
+    if (j.progressive && paint_coef(&j) != 0) {
+        jpeg_clear(&j);
+        return -1;
     }
     if (!j.saw_sof || j.comp[0].plane == NULL) {
         jpeg_clear(&j);
@@ -765,6 +1204,29 @@ static int jpeg_decode(const unsigned char *bytes, int n, unsigned char **rgba, 
 static int sample_bits(const unsigned char *row, int x, int depth);
 static int scale_depth(int v, int depth);
 
+struct PngView {
+    int depth;
+    int color;
+    int samples;
+    int bits;
+    int filter_bpp;
+    int have_gray;
+    int gray_key;
+    int have_rgb;
+    int key_r;
+    int key_g;
+    int key_b;
+    int npal;
+    const unsigned char *pal_r;
+    const unsigned char *pal_g;
+    const unsigned char *pal_b;
+    const unsigned char *pal_a;
+};
+
+static int pass_dim(int size, int origin, int step);
+static int paint_pass(unsigned char *raw, int pass_w, int pass_h, unsigned char *out, int full_w, int full_h, int x0,
+                      int y0, int dx, int dy, const struct PngView *view);
+
 int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w, int *h) {
     static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
     unsigned char *idat = NULL;
@@ -787,6 +1249,7 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     int key_r = 0;
     int key_g = 0;
     int key_b = 0;
+    int interlace = 0;
     unsigned char pal_r[256];
     unsigned char pal_g[256];
     unsigned char pal_b[256];
@@ -827,11 +1290,12 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
             height = be32(data + 4);
             depth = data[8];
             color = data[9];
-            if (data[10] != 0 || data[11] != 0 || data[12] != 0 || width == 0 || height == 0 || width > 4096 ||
+            if (data[10] != 0 || data[11] != 0 || data[12] > 1 || width == 0 || height == 0 || width > 4096 ||
                 height > 4096) {
                 free(idat);
                 return -1;
             }
+            interlace = data[12];
             saw = 1;
         } else if (memcmp(type, "PLTE", 4) == 0) {
             int i = 0;
@@ -870,7 +1334,7 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
                     return -1;
                 }
                 key = (data[0] << 8) | data[1];
-                if (depth >= 1 && depth <= 8 && key < (1 << depth)) {
+                if (depth == 16 || (depth >= 1 && depth <= 8 && key < (1 << depth))) {
                     gray_key = key;
                     have_gray = 1;
                 }
@@ -879,10 +1343,10 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
                     free(idat);
                     return -1;
                 }
-                if (data[0] == 0 && data[2] == 0 && data[4] == 0) {
-                    key_r = data[1];
-                    key_g = data[3];
-                    key_b = data[5];
+                key_r = (data[0] << 8) | data[1];
+                key_g = (data[2] << 8) | data[3];
+                key_b = (data[4] << 8) | data[5];
+                if (depth == 16 || (key_r < 256 && key_g < 256 && key_b < 256)) {
                     have_rgb = 1;
                 }
             } else {
@@ -915,7 +1379,6 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
         }
         at += 12 + (int)len;
     }
-    /* shortcut: 16-bit samples and Adam7 interlacing are refused. */
     if (color == 0 || color == 3) {
         samples = 1;
     } else if (color == 2) {
@@ -929,27 +1392,59 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
         free(idat);
         return -1;
     }
-    if (color == 2 || color == 4 || color == 6) {
-        if (depth != 8) {
+    if (color == 3) {
+        if (depth != 1 && depth != 2 && depth != 4 && depth != 8) {
             free(idat);
             return -1;
         }
-    } else if (depth != 1 && depth != 2 && depth != 4 && depth != 8) {
+    } else if (color == 0) {
+        if (depth != 1 && depth != 2 && depth != 4 && depth != 8 && depth != 16) {
+            free(idat);
+            return -1;
+        }
+    } else if (depth != 8 && depth != 16) {
         free(idat);
         return -1;
     }
     bits = depth * samples;
     filter_bpp = (bits + 7) / 8;
-    if (filter_bpp < 1 || width > (1u << 20) / (unsigned)bits) {
+    if (filter_bpp < 1 || bits < 1 || width > (1u << 20) / (unsigned)bits) {
         free(idat);
         return -1;
     }
-    stride = ((int)width * bits + 7) / 8;
-    if (stride < 1 || height > (1u << 28) / (unsigned)(stride + 1)) {
-        free(idat);
-        return -1;
+    if (interlace == 0) {
+        stride = ((int)width * bits + 7) / 8;
+        if (stride < 1 || height > (1u << 28) / (unsigned)(stride + 1)) {
+            free(idat);
+            return -1;
+        }
+        raw_n = (uLongf)((stride + 1) * (int)height);
+    } else {
+        static const int adam_x[7] = {0, 4, 0, 2, 0, 1, 0};
+        static const int adam_y[7] = {0, 0, 4, 0, 2, 0, 1};
+        static const int adam_dx[7] = {8, 8, 4, 4, 2, 2, 1};
+        static const int adam_dy[7] = {8, 8, 8, 4, 4, 2, 2};
+        int pass = 0;
+        raw_n = 0;
+        for (pass = 0; pass < 7; pass++) {
+            int pw = pass_dim((int)width, adam_x[pass], adam_dx[pass]);
+            int ph = pass_dim((int)height, adam_y[pass], adam_dy[pass]);
+            int row_bytes = 0;
+            if (pw < 1 || ph < 1) {
+                continue;
+            }
+            if (pw > (1 << 20) / bits) {
+                free(idat);
+                return -1;
+            }
+            row_bytes = (pw * bits + 7) / 8;
+            if (row_bytes < 1 || ph > (1 << 28) / (row_bytes + 1)) {
+                free(idat);
+                return -1;
+            }
+            raw_n += (uLongf)(row_bytes + 1) * (uLongf)ph;
+        }
     }
-    raw_n = (uLongf)((stride + 1) * (int)height);
     raw = malloc((size_t)raw_n);
     if (raw == NULL) {
         free(idat);
@@ -965,7 +1460,7 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     z.avail_in = (uInt)idat_n;
     z.next_out = raw;
     z.avail_out = (uInt)raw_n;
-    if (inflate(&z, Z_FINISH) != Z_STREAM_END || unfilter(raw, (int)height, stride, filter_bpp) != 0) {
+    if (inflate(&z, Z_FINISH) != Z_STREAM_END || z.total_out != raw_n) {
         inflateEnd(&z);
         free(idat);
         free(raw);
@@ -973,62 +1468,59 @@ int image_decode(const unsigned char *bytes, int n, unsigned char **rgba, int *w
     }
     inflateEnd(&z);
     free(idat);
-    out = malloc((size_t)width * (size_t)height * 4);
+    idat = NULL;
+    out = calloc((size_t)width * (size_t)height, 4);
     if (out == NULL) {
         free(raw);
         return -1;
     }
-    for (unsigned long y = 0; y < height; y++) {
-        unsigned char *pix = raw + y * (size_t)(stride + 1) + 1;
-        for (unsigned long x = 0; x < width; x++) {
-            unsigned char *d = out + (y * width + x) * 4;
-            int r = 0;
-            int g = 0;
-            int b = 0;
-            int a = 255;
-            if (color == 0) {
-                int s = sample_bits(pix, (int)x, depth);
-                if (have_gray && s == gray_key) {
-                    a = 0;
-                }
-                g = scale_depth(s, depth);
-                r = g;
-                b = g;
-            } else if (color == 4) {
-                g = pix[x * 2];
-                a = pix[x * 2 + 1];
-                r = g;
-                b = g;
-            } else if (color == 3) {
-                int idx = sample_bits(pix, (int)x, depth);
-                if (idx < 0 || idx >= npal) {
-                    free(out);
-                    free(raw);
-                    return -1;
-                }
-                r = pal_r[idx];
-                g = pal_g[idx];
-                b = pal_b[idx];
-                a = pal_a[idx];
-            } else if (color == 2) {
-                unsigned char *s = pix + x * 3;
-                r = s[0];
-                g = s[1];
-                b = s[2];
-                if (have_rgb && r == key_r && g == key_g && b == key_b) {
-                    a = 0;
-                }
-            } else {
-                unsigned char *s = pix + x * 4;
-                r = s[0];
-                g = s[1];
-                b = s[2];
-                a = s[3];
+    {
+        struct PngView view;
+        unsigned char *cursor = raw;
+        size_t used = 0;
+        int pass = 0;
+        static const int adam_x[7] = {0, 4, 0, 2, 0, 1, 0};
+        static const int adam_y[7] = {0, 0, 4, 0, 2, 0, 1};
+        static const int adam_dx[7] = {8, 8, 4, 4, 2, 2, 1};
+        static const int adam_dy[7] = {8, 8, 8, 4, 4, 2, 2};
+        int passes = interlace ? 7 : 1;
+        memset(&view, 0, sizeof view);
+        view.depth = depth;
+        view.color = color;
+        view.samples = samples;
+        view.bits = bits;
+        view.filter_bpp = filter_bpp;
+        view.have_gray = have_gray;
+        view.gray_key = gray_key;
+        view.have_rgb = have_rgb;
+        view.key_r = key_r;
+        view.key_g = key_g;
+        view.key_b = key_b;
+        view.npal = npal;
+        view.pal_r = pal_r;
+        view.pal_g = pal_g;
+        view.pal_b = pal_b;
+        view.pal_a = pal_a;
+        for (pass = 0; pass < passes; pass++) {
+            int x0 = interlace ? adam_x[pass] : 0;
+            int y0 = interlace ? adam_y[pass] : 0;
+            int dx = interlace ? adam_dx[pass] : 1;
+            int dy = interlace ? adam_dy[pass] : 1;
+            int pw = interlace ? pass_dim((int)width, x0, dx) : (int)width;
+            int ph = interlace ? pass_dim((int)height, y0, dy) : (int)height;
+            int got = paint_pass(cursor, pw, ph, out, (int)width, (int)height, x0, y0, dx, dy, &view);
+            if (got < 0 || used > (size_t)raw_n - (size_t)got) {
+                free(out);
+                free(raw);
+                return -1;
             }
-            d[0] = (unsigned char)r;
-            d[1] = (unsigned char)g;
-            d[2] = (unsigned char)b;
-            d[3] = (unsigned char)a;
+            cursor += got;
+            used += (size_t)got;
+        }
+        if (used != (size_t)raw_n) {
+            free(out);
+            free(raw);
+            return -1;
         }
     }
     free(raw);
@@ -1053,4 +1545,118 @@ static int scale_depth(int v, int depth) {
         return v;
     }
     return v * 255 / maxv;
+}
+
+static int pass_dim(int size, int origin, int step) {
+    if (size <= origin || step < 1) {
+        return 0;
+    }
+    return (size - origin + step - 1) / step;
+}
+
+/* Unfilter one Adam7 pass, or the whole image, and write RGBA. Returns bytes consumed, or -1. */
+static int paint_pass(unsigned char *raw, int pass_w, int pass_h, unsigned char *out, int full_w, int full_h, int x0,
+                      int y0, int dx, int dy, const struct PngView *view) {
+    int stride = 0;
+    int y = 0;
+    int x = 0;
+    if (pass_w < 1 || pass_h < 1) {
+        return 0;
+    }
+    if (view == NULL || view->bits < 1 || pass_w > (1 << 20) / view->bits) {
+        return -1;
+    }
+    stride = (pass_w * view->bits + 7) / 8;
+    if (stride < 1 || view->filter_bpp < 1 || view->filter_bpp > stride || pass_h > (1 << 28) / (stride + 1)) {
+        return -1;
+    }
+    if (unfilter(raw, pass_h, stride, view->filter_bpp) != 0) {
+        return -1;
+    }
+    for (y = 0; y < pass_h; y++) {
+        unsigned char *pix = raw + (size_t)y * (size_t)(stride + 1) + 1;
+        for (x = 0; x < pass_w; x++) {
+            int r = 0;
+            int g = 0;
+            int b = 0;
+            int a = 255;
+            int dest_x = x0 + x * dx;
+            int dest_y = y0 + y * dy;
+            unsigned char *d = NULL;
+            if (dest_x < 0 || dest_y < 0 || dest_x >= full_w || dest_y >= full_h) {
+                return -1;
+            }
+            if (view->depth == 16 && view->color == 0) {
+                int s = (pix[x * 2] << 8) | pix[x * 2 + 1];
+                g = pix[x * 2];
+                r = g;
+                b = g;
+                if (view->have_gray && s == view->gray_key) {
+                    a = 0;
+                }
+            } else if (view->depth == 16 && view->color == 4) {
+                g = pix[x * 4];
+                a = pix[x * 4 + 2];
+                r = g;
+                b = g;
+            } else if (view->depth == 16 && view->color == 2) {
+                int sr = (pix[x * 6] << 8) | pix[x * 6 + 1];
+                int sg = (pix[x * 6 + 2] << 8) | pix[x * 6 + 3];
+                int sb = (pix[x * 6 + 4] << 8) | pix[x * 6 + 5];
+                r = pix[x * 6];
+                g = pix[x * 6 + 2];
+                b = pix[x * 6 + 4];
+                if (view->have_rgb && sr == view->key_r && sg == view->key_g && sb == view->key_b) {
+                    a = 0;
+                }
+            } else if (view->depth == 16 && view->color == 6) {
+                r = pix[x * 8];
+                g = pix[x * 8 + 2];
+                b = pix[x * 8 + 4];
+                a = pix[x * 8 + 6];
+            } else if (view->color == 0) {
+                int s = sample_bits(pix, x, view->depth);
+                if (view->have_gray && s == view->gray_key) {
+                    a = 0;
+                }
+                g = scale_depth(s, view->depth);
+                r = g;
+                b = g;
+            } else if (view->color == 4) {
+                g = pix[x * 2];
+                a = pix[x * 2 + 1];
+                r = g;
+                b = g;
+            } else if (view->color == 3) {
+                int idx = sample_bits(pix, x, view->depth);
+                if (idx < 0 || idx >= view->npal) {
+                    return -1;
+                }
+                r = view->pal_r[idx];
+                g = view->pal_g[idx];
+                b = view->pal_b[idx];
+                a = view->pal_a[idx];
+            } else if (view->color == 2) {
+                unsigned char *s = pix + x * 3;
+                r = s[0];
+                g = s[1];
+                b = s[2];
+                if (view->have_rgb && r == view->key_r && g == view->key_g && b == view->key_b) {
+                    a = 0;
+                }
+            } else {
+                unsigned char *s = pix + x * 4;
+                r = s[0];
+                g = s[1];
+                b = s[2];
+                a = s[3];
+            }
+            d = out + ((size_t)dest_y * (size_t)full_w + (size_t)dest_x) * 4;
+            d[0] = (unsigned char)r;
+            d[1] = (unsigned char)g;
+            d[2] = (unsigned char)b;
+            d[3] = (unsigned char)a;
+        }
+    }
+    return (stride + 1) * pass_h;
 }

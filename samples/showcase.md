@@ -5,7 +5,7 @@ A native note on a phone, painted from the markdown you type. This file is the l
 Penship
 ========
 
-A double tap or a press-and-hold selects the word and offers Copy. Cut and Paste are on that menu only while you can edit. A long press where there is no word offers Paste at the caret, and Read only hides it. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close. A table stays a grid: the caret sits in the cell, Tab steps across, and Enter moves down the column. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two, and a heading of two is taller than the paragraph under it. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
+A double tap or a press-and-hold selects the word and offers Copy. Cut and Paste are on that menu only while you can edit. A long press where there is no word offers Paste at the caret, and Read only hides it. The ends of the highlight can be dragged. A single tap only moves the caret. In the ordinary mode the line with the caret is the editor, and every other line stays rendered. Move the caret and that one line changes with it. A code fence opens as a whole block, from the opening marks through the close. A table stays a grid: the caret sits in the cell, Tab steps across, and Enter moves down the column. Read only is the mode that paints the whole note and ignores typing. Source shows the marks of the whole note, and it turns Read only off. The format row is a strip of symbols along the bottom, and it hides in Read only. Back closes a menu, then the keyboard, and it stays in the note. A heading of one hash is taller than a heading of two, and each added hash steps down. Six hashes are still taller than the paragraph under them. Settings also opens Typewriter, and with Typewriter on the caret line sits in the vertical middle while the text slides under it. Line paints a light band across the caret line, and the words stay readable through it.
 
 ## How to read this note
 
@@ -58,7 +58,7 @@ A link shows its words, as in [the Penship note](https://penship.app), and hides
 
 - [x] Open a markdown file from the share sheet.
 - [x] Paint headings, emphasis, code, links, lists, quotes, and fences.
-- [x] Paint rules, tasks, setext headings, pipe tables, and images as their alt text.
+- [x] Paint rules, tasks, setext headings, pipe tables, and pictures.
 - [x] Draw a line through struck words, and indent a nested list.
 - [x] Move between table cells with Tab. Tab on the last cell adds a row.
 - [x] Continue a list, task, or quote with Enter. Enter on the empty marker leaves it.
@@ -66,7 +66,7 @@ A link shows its words, as in [the Penship note](https://penship.app), and hides
 - [x] Hide inline code ticks, link addresses, and image addresses off the caret line.
 - [x] Put Smaller, Larger, Font, Typewriter, Focus, Theme, and Source in a Settings view.
 - [x] Export HTML from this same buffer.
-- [ ] Draw pictures and math.
+- [ ] Draw math.
 
 ## A quotation
 
@@ -173,7 +173,7 @@ Until then, this note grows in place. The next feature appends a section rather 
 
 ## Pictures
 
-An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. A grayscale or palette PNG is drawn the same way. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
+An image on its own line is the picture, and it fills the column, when the file is a PNG or a JPEG next to the note. A grayscale, palette, 16-bit, or interlaced PNG is drawn the same way. A progressive JPEG is drawn the same way. The ship is a public-domain file on Wikimedia Commons. Penship fetches it once and keeps the copy. It is not packed in the app.
 
 ![the ship Endeavour](https://commons.wikimedia.org/wiki/Special:FilePath/Endeavour.png)
 

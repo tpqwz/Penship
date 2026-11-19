@@ -183,6 +183,23 @@ static const unsigned char tr_png[] = {
     0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 };
 
+static const unsigned char g16_png[] = {
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+    0, 0, 0, 2, 0, 0, 0, 2, 16, 0, 0, 0, 0, 7, 77, 142,
+    187, 0, 0, 0, 18, 73, 68, 65, 84, 120, 156, 99, 116, 96, 96, 96,
+    96, 98, 96, 96, 96, 0, 0, 2, 94, 0, 68, 34, 226, 6, 79, 0,
+    0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+};
+
+static const unsigned char lace_png[] = {
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+    0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0, 75, 109, 41,
+    220, 0, 0, 0, 33, 73, 68, 65, 84, 120, 156, 99, 228, 18, 145, 99,
+    192, 6, 152, 24, 24, 24, 190, 190, 121, 132, 41, 193, 136, 79, 199, 192,
+    72, 124, 123, 253, 8, 0, 50, 171, 6, 13, 25, 41, 124, 117, 0, 0,
+    0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+};
+
 int main(void) {
     static const unsigned char png[] = {137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0,
                                          0, 2, 8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156,
@@ -210,8 +227,11 @@ int main(void) {
     free(rgba);
     rgba = NULL;
     expect(image_decode(red_jpg, 20, &rgba, &w, &h) != 0 && rgba == NULL, "a short jpeg is refused");
-    expect(image_decode(prog_jpg, (int)sizeof prog_jpg, &rgba, &w, &h) != 0 && rgba == NULL,
-           "a progressive jpeg is refused");
+    expect(image_decode(prog_jpg, (int)sizeof prog_jpg, &rgba, &w, &h) == 0, "a progressive jpeg decodes");
+    expect(w == 8 && h == 8 && rgba != NULL && rgba[0] < 30 && rgba[1] > 150 && rgba[2] < 30,
+           "the progressive block stays green");
+    free(rgba);
+    rgba = NULL;
     if (fails != 0) {
         fprintf(stderr, "%d failed\n", fails);
         return 1;
@@ -237,6 +257,15 @@ int main(void) {
     rgba = NULL;
     expect(image_decode(tr_png, (int)sizeof tr_png, &rgba, &w, &h) == 0, "a palette transparency decodes");
     expect(w == 1 && h == 1 && rgba != NULL && rgba[0] == 255 && rgba[3] == 0, "the transparent index has no alpha");
+    free(rgba);
+    rgba = NULL;
+        expect(image_decode(g16_png, (int)sizeof g16_png, &rgba, &w, &h) == 0, "a 16-bit gray png decodes");
+    expect(w == 2 && h == 2 && rgba != NULL && rgba[0] == 64 && rgba[1] == 64 && rgba[3] == 255, "16-bit gray keeps the high byte");
+    free(rgba);
+    rgba = NULL;
+    expect(image_decode(lace_png, (int)sizeof lace_png, &rgba, &w, &h) == 0, "an interlaced png decodes");
+    expect(w == 8 && h == 8 && rgba != NULL && rgba[0] == 10 && rgba[1] == 20 && rgba[2] == 30, "the first interlaced pixel is in place");
+    expect(rgba[(1 * 8 + 1) * 4] == 255 && rgba[(7 * 8 + 7) * 4 + 1] == 255, "later interlaced pixels land on their pass");
     free(rgba);
     rgba = NULL;
         printf("image_test ok\n");
