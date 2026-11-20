@@ -2797,6 +2797,76 @@ static int keep_geometry(const char *text, size_t text_len, int origin_x, int ma
            g_keep_mono == g_mono_stamp && text_hash(text, text_len) == g_keep_hash;
 }
 
+/* Bytes strictly inside a `...` pair. An unclosed tick does not count. */
+static int byte_in_code(const char *s, size_t n, size_t at) {
+    size_t i = 0;
+    if (s == NULL || at >= n || s[at] == '`') {
+        return 0;
+    }
+    while (i < n) {
+        if (s[i] == '`') {
+            size_t j = i + 1;
+            while (j < n && s[j] != '`') {
+                j++;
+            }
+            if (j >= n) {
+                return 0;
+            }
+            if (at > i && at < j) {
+                return 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Tick pairs become code. Every other byte keeps base, so a heading stays a heading. */
+static uint8_t *code_span_marks(const char *s, size_t n, uint8_t base) {
+    uint8_t *mark = NULL;
+    size_t i = 0;
+    if (s == NULL || n == 0 || n > (1u << 18)) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (s[i] == '`') {
+            break;
+        }
+    }
+    if (i >= n) {
+        return NULL;
+    }
+    mark = malloc(n);
+    if (mark == NULL) {
+        return NULL;
+    }
+    memset(mark, base, n);
+    i = 0;
+    while (i < n) {
+        if (s[i] == '`') {
+            size_t j = i + 1;
+            size_t k = 0;
+            while (j < n && s[j] != '`') {
+                j++;
+            }
+            if (j >= n) {
+                break;
+            }
+            mark[i] = KIND_SKIP;
+            for (k = i + 1; k < j; k++) {
+                mark[k] = KIND_CODE;
+            }
+            mark[j] = KIND_SKIP;
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return mark;
+}
+
 /* Tick lines keep their ticks in the measure so stepping onto the line does not need another row.
    Code letters still use the code face. Other lines stay on the body measure. */
 static uint32_t measure_line(const char *text, size_t off, size_t content, size_t caret, int origin_x, int max_x,
@@ -2809,6 +2879,14 @@ static uint32_t measure_line(const char *text, size_t off, size_t content, size_
     uint32_t rows = 0;
     if (kind == KIND_CODE) {
         uniform = KIND_CODE;
+    } else if (kind == KIND_HEAD) {
+        mark = code_span_marks(text + off, content, (uint8_t)KIND_HEAD);
+        if (mark != NULL) {
+            uniform = KIND_HEAD;
+            if (!g_readonly && (g_editing || g_source)) {
+                layout_source = 1;
+            }
+        }
     } else if (kind == KIND_BODY && content > 0 && content <= (1u << 18)) {
         for (i = 0; i < content; i++) {
             if (text[off + i] == '`') {
@@ -4150,11 +4228,18 @@ static int text_width(const char *s, size_t n, float scale) {
         if (k < 0) {
             break;
         }
+        size_t at = i;
         i += (size_t)k;
         int ax = 0;
         int lsb = 0;
-        stbtt_GetCodepointHMetrics(&g_font, (int)cp, &ax, &lsb);
-        int adv = (int)((float)ax * scale + 0.5f);
+        stbtt_fontinfo *font = &g_font;
+        float use = scale;
+        if (g_mono_ok && byte_in_code(s, n, at)) {
+            font = &g_mono;
+            use = face_scale(&g_mono, scale);
+        }
+        stbtt_GetCodepointHMetrics(font, (int)cp, &ax, &lsb);
+        int adv = (int)((float)ax * use + 0.5f);
         if (adv < 0) {
             adv = 0;
         }
@@ -4645,7 +4730,10 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
             int inner = cell_text_px(col_w[c]);
             size_t starts[6];
             size_t slices[6];
-            int slices_n = pack_words(text, line->off + at[c], len[c], inner, scale, starts, slices, 6);
+            size_t cell_at = line->off + at[c];
+            uint8_t base = (uint8_t)(header ? KIND_HEAD : KIND_BODY);
+            uint8_t *cell_mark = code_span_marks(text + cell_at, len[c], base);
+            int slices_n = pack_words(text, cell_at, len[c], inner, scale, starts, slices, 6);
             for (int slice = 0; slice < slices_n; slice++) {
                 int slice_w = text_width(text + starts[slice], slices[slice], scale);
                 int ox = x + pad;
@@ -4661,15 +4749,21 @@ static void paint_table_line(uint8_t *px, int width, int height, const char *tex
                 int cx = 0;
                 int crow = 0;
                 size_t slice_caret = SIZE_MAX;
+                const uint8_t *slice_mark = NULL;
                 if (caret >= starts[slice] && caret <= starts[slice] + slices[slice]) {
                     slice_caret = caret;
                 }
+                if (cell_mark != NULL && starts[slice] >= cell_at &&
+                    starts[slice] + slices[slice] <= cell_at + len[c]) {
+                    slice_mark = cell_mark + (starts[slice] - cell_at);
+                }
                 g_line_clip = 1;
                 layout_line(px, width, height, text, starts[slice], slices[slice], slice_caret, ox, ox + inner,
-                            origin_y, line_h, baseline, space_px, scale, 1, slice_y, scroll, view_h, 0, 0, 1, NULL,
-                            header ? KIND_HEAD : KIND_BODY, &cx, &crow);
+                            origin_y, line_h, baseline, space_px, scale, 1, slice_y, scroll, view_h, 0, 0, 1,
+                            slice_mark, base, &cx, &crow);
                 g_line_clip = 0;
             }
+            free(cell_mark);
         }
         x += col_w[c];
     }
@@ -5018,6 +5112,9 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
                         mark_block(text + line.off, line.content, mark);
                         marks = mark;
                     }
+                } else if (line.kind == KIND_HEAD && line.content > 0 && line.content <= (1u << 18)) {
+                    mark = code_span_marks(text + line.off, line.content, (uint8_t)KIND_HEAD);
+                    marks = mark;
                 }
                 int cx = 0;
                 int crow = 0;
@@ -5044,6 +5141,9 @@ void page_draw(uint8_t *px, int width, int height, int box_x, int box_y, int box
                     mark_block(text + line.off, line.content, mark);
                     marks = mark;
                 }
+            } else if (line.kind == KIND_HEAD && line.content > 0 && line.content <= (1u << 18)) {
+                mark = code_span_marks(text + line.off, line.content, (uint8_t)KIND_HEAD);
+                marks = mark;
             }
             int cx = 0;
             int crow = 0;
@@ -5159,13 +5259,16 @@ static size_t table_hit(const char *text, const struct Index *idx, size_t li, in
         int inner = cell_text_px(col_w[col]);
         size_t starts[6];
         size_t slices[6];
-        int slices_n = pack_words(text, line->off + at[col], cell_len[col], inner, scale, starts, slices, 6);
+        size_t cell_at = line->off + at[col];
+        uint8_t *cell_mark = code_span_marks(text + cell_at, cell_len[col], (uint8_t)KIND_BODY);
+        int slices_n = pack_words(text, cell_at, cell_len[col], inner, scale, starts, slices, 6);
         int slice = 0;
         int slice_w = 0;
         int ox = 0;
         int out_x = 0;
         int out_row = 0;
         if (slices_n < 1) {
+            free(cell_mark);
             return line->off + at[col];
         }
         slice = hit_row;
@@ -5189,9 +5292,17 @@ static size_t table_hit(const char *text, const struct Index *idx, size_t li, in
         g_seek_dist = INT_MAX;
         g_mute_measures = 1;
         g_line_clip = 1;
-        layout_line(NULL, 0, 0, text, starts[slice], slices[slice], SIZE_MAX, ox, ox + inner, 0, space_px, 0, space_px,
-                    scale, 0, 0, 0, 1, 0, 0, 1, NULL, KIND_BODY, &out_x, &out_row);
+        {
+            const uint8_t *slice_mark = NULL;
+            if (cell_mark != NULL && starts[slice] >= cell_at &&
+                starts[slice] + slices[slice] <= cell_at + cell_len[col]) {
+                slice_mark = cell_mark + (starts[slice] - cell_at);
+            }
+            layout_line(NULL, 0, 0, text, starts[slice], slices[slice], SIZE_MAX, ox, ox + inner, 0, space_px, 0,
+                        space_px, scale, 0, 0, 0, 1, 0, 0, 1, slice_mark, KIND_BODY, &out_x, &out_row);
+        }
         g_line_clip = 0;
+        free(cell_mark);
         g_mute_measures = 0;
         g_seek = 0;
         (void)out_x;
@@ -5305,6 +5416,9 @@ size_t page_hit(int box_x, int box_y, int box_w, int box_h, const char *text, si
             mark_block(text + line.off, line.content, mark);
             marks = mark;
         }
+    } else if (line.kind == KIND_HEAD && line.content > 0 && line.content <= (1u << 18)) {
+        mark = code_span_marks(text + line.off, line.content, (uint8_t)KIND_HEAD);
+        marks = mark;
     }
     uint64_t into = doc_y >= line_y ? doc_y - line_y : 0;
     int use_h = line_h;

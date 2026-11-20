@@ -1515,6 +1515,49 @@ static unsigned char *load_named(const char *path, int *len) {
     return bytes;
 }
 
+static int code_ink_span(const char *text) {
+    const int width = 640;
+    const int height = 240;
+    uint8_t *px = calloc((size_t)width * (size_t)height, 4);
+    int lo = width;
+    int hi = -1;
+    int y = 0;
+    int x = 0;
+    expect(px != NULL, "table code buffer");
+    if (px == NULL) {
+        return 0;
+    }
+    page_scroll_place(0.f);
+    page_draw(px, width, height, 0, 0, width, height, text, strlen(text), 0, 0, 32);
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            const uint8_t *p = px + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            int dr = (int)p[0] - PAGE_CODE_R;
+            int dg = (int)p[1] - PAGE_CODE_G;
+            int db = (int)p[2] - PAGE_CODE_B;
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr <= 24 && dg <= 24 && db <= 24 && (p[0] != PAGE_PAPER_R || p[1] != PAGE_PAPER_G || p[2] != PAGE_PAPER_B)) {
+                if (x < lo) {
+                    lo = x;
+                }
+                if (x > hi) {
+                    hi = x;
+                }
+            }
+        }
+    }
+    free(px);
+    return hi >= lo ? hi - lo + 1 : 0;
+}
+
 static int caret_x_at(const char *text, size_t caret) {
     const int width = 640;
     const int height = 240;
@@ -1554,6 +1597,9 @@ static void test_code_font(const unsigned char *font, int font_len) {
     fi = caret_x_at("```\ni\n```\n", 5);
     fm = caret_x_at("```\nm\n```\n", 5);
     expect(fm > fi + 1, "sans gives m a wider fence than i");
+    expect(caret_x_at("# `m`", 4) > caret_x_at("# `i`", 4) + 1, "sans gives m a wider heading tick than i");
+    expect(code_ink_span("| `m` |\n| --- |\n") > code_ink_span("| `i` |\n| --- |\n") + 1,
+           "sans gives m a wider table tick than i");
     mono = load_named("assets/LiberationMono-Regular.ttf", &mono_len);
     expect(mono != NULL && page_set_mono(mono, mono_len) == 0 && page_mono() == 1, "mono face loads");
     if (mono != NULL && page_mono()) {
@@ -1571,6 +1617,20 @@ static void test_code_font(const unsigned char *font, int font_len) {
             gap = -gap;
         }
         expect(gap <= 1, "a fence uses the mono face");
+        xi = caret_x_at("# `i`", 4);
+        xm = caret_x_at("# `m`", 4);
+        gap = xm - xi;
+        if (gap < 0) {
+            gap = -gap;
+        }
+        expect(gap <= 1, "a heading tick uses the mono face");
+        fi = code_ink_span("| `i` |\n| --- |\n");
+        fm = code_ink_span("| `m` |\n| --- |\n");
+        gap = fm - fi;
+        if (gap < 0) {
+            gap = -gap;
+        }
+        expect(gap <= 2, "a table tick uses the mono face");
     }
     page_set_mono(NULL, 0);
     expect(page_mono() == 0, "clearing mono leaves code on the body face");

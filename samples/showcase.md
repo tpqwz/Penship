@@ -131,7 +131,7 @@ Settings is its own screen. The format bar stays on the page. Settings opens thi
 
 - Smaller and Larger step the type size from 14 to 32 sp.
 - Font cycles the three Liberation faces: sans, then serif, then mono.
-- Code font is the face for ticks and fences. It cycles the note's face, Liberation Mono, a monospace face from the phone, and a downloaded monospace face. The row names the one in use.
+- Code font is the face for ticks and fences, including a tick in a heading or a table cell. It cycles the note's face, Liberation Mono, a monospace face from the phone, and a downloaded monospace face. The row names the one in use.
 - Font file asks for a TrueType file. If the file loads, it becomes the face and it is remembered. A file the painter cannot read leaves the current face alone. Font lists shows each file face first. A tap on one uses that file again. The rows under those are faces to fetch.
 - Typewriter keeps the caret line in the vertical middle.
 - Focus dims every line except the one you are on.
